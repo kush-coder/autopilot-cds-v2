@@ -1,0 +1,17 @@
+baseURL = "/"
+title = "CDS - Continuous Delivery Service"
+
+languageCode = "en-us"
+defaultContentLanguage = "en"
+defaultContentLanguageInSubdir = false
+contentDir = "content"
+
+disableKinds = ["taxonomy", "taxonomyTerm"]
+canonifyurls = false
+relativeURLs = true
+
+[outputs]
+home = [ "HTML", "RSS", "JSON"]
+
+[params]
+#  version = "" # Optional (default: master), overrides GH links with given release version.

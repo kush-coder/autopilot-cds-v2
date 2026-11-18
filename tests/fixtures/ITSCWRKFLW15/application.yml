@@ -1,0 +1,16 @@
+version: v1.0
+name: ITSCWRKFLW15-APPLICATION
+deployments:
+  simple-integration-dev:
+    deployment.token:
+      type: password
+      value:
+    retry.delay:
+      type: string
+      value: "50"
+    retry.max:
+      type: string
+      value: "100"
+    version:
+      type: string
+      value: '{{.cds.version}}'

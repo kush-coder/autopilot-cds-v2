@@ -1,0 +1,19 @@
+<h3><span nz-icon nzType="apartment" nzTheme="outline"></span> {{'usage_pipeline_list' | translate}}</h3>
+<div class="nzSegment">
+  @if (pipelines && pipelines.length > 0) {
+    <nz-row>
+      @for (pip of pipelines; track pip) {
+        <nz-col [nzSpan]="4" [nzOffset]="2">
+          @if (project) {
+            <a [routerLink]="['/project', project.key, 'pipeline', pip.name]">{{pip.name}}</a>
+          }
+          @if (!project) {
+            <a [routerLink]="['/project', pip.projectKey, 'pipeline', pip.name]">{{pip.name}}</a>
+          }
+        </nz-col>
+      }
+    </nz-row>
+  } @else {
+    <span>{{ 'common_no_pipeline' | translate }}</span>
+  }
+</div>

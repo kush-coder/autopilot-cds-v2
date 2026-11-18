@@ -1,0 +1,29 @@
+nz-col {
+  padding-right: 20px;
+
+}
+
+nz-form-label {
+
+  a {
+    margin-left: 10px;
+  }
+  .group-help {
+    float: right;
+    cursor: pointer;
+    font-size: 11px;
+  }
+}
+
+nz-select {
+  width: 100%;
+}
+
+.group-help-popup {
+    display: flex;
+    flex-direction: column;
+
+    button {
+        margin-top: 10px;
+    }
+}

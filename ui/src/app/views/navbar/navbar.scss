@@ -1,0 +1,132 @@
+@use "../../../common" as common;
+
+.not-dark {
+    background-color: #24292e !important;
+}
+
+:host {
+    ::ng-deep {
+        app-search-bar:has(>app-input-filter>input:focus) {
+            flex: 1;
+        }
+    }
+}
+
+.navbar {
+    width: 100%;
+    padding-left: 0;
+    padding-right: 0;
+    border-radius: 0;
+    height: 64px;
+    display: flex;
+    align-items: center;
+
+    :host-context(.night) &,
+    :host-context(.night) {
+        box-shadow: none;
+    }
+
+    .menu-right {
+        margin-left: 20px;
+        flex: 1;
+        display: flex;
+        align-items: center;
+        flex-direction: row-reverse;
+    }
+
+    .logo {
+        margin-right: 30px;
+
+        img {
+            height: 50px;
+            padding: 5px 16px;
+        }
+    }
+
+    nz-tag {
+        font-weight: bold;
+        margin-right: 20px;
+    }
+
+    app-search-bar {
+        width: 350px;
+        margin-right: 20px;
+    }
+
+    .details {
+        .ring {
+            height: 100%;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            margin: 0 20px;
+        }
+    }
+
+    nz-select {
+        min-width: 100px;
+
+        &.not-dark {
+            ::ng-deep {
+                .ant-select-selector {
+                    color: white;
+                    background-color: #24292e !important;
+                }
+
+                .ant-select-arrow {
+                    color: white;
+                }
+            }
+        }
+    }
+
+    [nz-dropdown] {
+        color: white;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        height: 64px;
+
+        div {
+            width: 20px;
+            display: flex;
+            margin-right: 6px;
+            align-items: center;
+        }
+    }
+
+    app-favorite-button {
+        width: 50px;
+        height: 50px;
+    }
+
+    [nz-popover] {
+        width: 60px;
+        height: 64px;
+        display: flex;
+        justify-content: center;
+        cursor: pointer;
+        color: white;
+
+        &:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+        }
+    }
+
+    .theme-trigger {
+        align-items: center;
+        background: none;
+        border: none;
+        padding: 0;
+        font-size: 16px;
+
+        &:focus-visible {
+            outline: 2px solid white;
+            outline-offset: -4px;
+        }
+    }
+}
+
+::ng-deep .theme-popup .ant-popover-inner-content {
+    padding: 8px;
+}

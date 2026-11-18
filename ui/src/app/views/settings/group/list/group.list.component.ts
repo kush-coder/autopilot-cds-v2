@@ -1,0 +1,76 @@
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component } from '@angular/core';
+import { finalize } from 'rxjs/operators';
+import { Group } from '../../../../model/group.model';
+import { GroupService } from '../../../../service/group/group.service';
+import { PathItem } from '../../../../shared/breadcrumb/breadcrumb.component';
+import { Column, ColumnType, DataTableComponent } from '../../../../shared/table/data-table.component';
+
+@Component({
+    standalone: false,
+    selector: 'app-group-list',
+    templateUrl: './group.list.html',
+    styleUrls: ['./group.list.scss'],
+    changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class GroupListComponent {
+    loading: boolean;
+    columns: Array<Column<Group>>;
+    groups: Array<Group>;
+    path: Array<PathItem>;
+
+    constructor(
+        private _groupService: GroupService,
+        private _cd: ChangeDetectorRef
+    ) {
+        this.columns = [
+            <Column<Group>>{
+                type: ColumnType.ROUTER_LINK,
+                name: 'common_name',
+                selector: (g: Group) => ({
+                    link: '/settings/group/' + g.name,
+                    value: g.name
+                })
+            },
+            <Column<Group>>{
+                type: ColumnType.TEXT,
+                name: 'Organization',
+                disabled: true,
+                selector: (u: Group) => u.organization
+            },
+            <Column<Group>>{
+                type: ColumnType.LABEL,
+                hidden: (g: Group) => !g.no_active_member,
+                selector: (g: Group) => ({
+                    class: 'red',
+                    value: 'group_no_active_member'
+                })
+            }
+        ];
+        this.getGroups();
+
+        this.path = [<PathItem>{
+            translate: 'common_settings'
+        }, <PathItem>{
+            translate: 'group_list_title',
+            routerLink: ['/', 'settings', 'group']
+        }];
+    }
+
+    getGroups(): void {
+        this.loading = true;
+        this._groupService.getAll()
+            .pipe(finalize(() => {
+                this.loading = false;
+                this._cd.markForCheck();
+            }))
+            .subscribe(gs => {
+                this.groups = gs;
+                const groupWithOrg = this.groups.map(g => !!g.organization).reduce((p, c) => p || c);
+                this.columns[1].disabled = !groupWithOrg;
+            });
+    }
+
+    filter(rawSearch: string) {
+        return DataTableComponent.filterArgsFunc(rawSearch, (search: string, g: Group) => g.name.toLowerCase().indexOf(search) !== -1);
+    }
+}

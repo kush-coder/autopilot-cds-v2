@@ -1,0 +1,16 @@
+<div class="wrapper">
+    <app-breadcrumb [path]="path"></app-breadcrumb>
+    <app-scrollview class="scrollview">
+        <nz-row>
+            <nz-col [nzSpan]="18">
+                <app-worker-model-form mode="edit" [loading]="loading" [workerModel]="workerModel" [groups]="groups"
+                                       [currentAuthSummary]="currentAuthSummary" [patterns]="patterns" [types]="types"
+                                       (save)="saveWorkerModel($event)" (saveAsCode)="saveWorkerModelAsCode($event)">
+                </app-worker-model-form>
+            </nz-col>
+            <nz-col [nzSpan]="6">
+                <app-worker-model-help></app-worker-model-help>
+            </nz-col>
+        </nz-row>
+    </app-scrollview>
+</div>

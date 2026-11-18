@@ -1,0 +1,206 @@
+<div *ngIf="display">
+    <nz-row>
+        <nz-col [nzSpan]="4">
+            <nz-steps [nzCurrent]="pipelineSection" nzDirection="vertical" nzSize="default">
+                <nz-step nzTitle="Pipeline" nzDescription="No pipeline will create a fork"></nz-step>
+                <nz-step nzTitle="Application" nzDescription="Optional"></nz-step>
+                <nz-step nzTitle="Environment" nzDescription="Optional"></nz-step>
+                <nz-step nzTitle="Integration" nzDescription="Optional"></nz-step>
+            </nz-steps>
+        </nz-col>
+        <nz-col [nzSpan]="20">
+            <nz-row [ngSwitch]="pipelineSection">
+                <!-- ############### PIPELINE SECTION ############## -->
+                <form nz-form *ngSwitchCase="0" nzLayout="inline">
+                    <nz-row>
+                        <nz-col [nzSpan]="24">
+                            <nz-tabs [nzAnimated]="false" [(nzSelectedIndex)]="pipIndexTab">
+                                <nz-tab nzTitle="Select an existing pipeline">
+                                    <nz-form-item>
+                                        <nz-form-label>Select pipeline</nz-form-label>
+                                        <nz-form-control>
+                                            <nz-form-control>
+                                                <nz-select name="pipeline" nzShowSearch [(ngModel)]="node.context.pipeline_id">
+                                                    <nz-option [nzValue]="0" nzLabel="(use a fork)"></nz-option>
+                                                    <nz-option *ngFor="let p of project.pipeline_names" [nzValue]="p.id" [nzLabel]="p.name"></nz-option>
+                                                </nz-select>
+                                            </nz-form-control>
+                                        </nz-form-control>
+                                    </nz-form-item>
+                                    <nz-form-item>
+                                        <nz-form-label>
+                                            <a href="#" [routerLink]="['/docs', 'docs', 'concepts', 'workflow', 'mutex']" target="_blank" rel="noopener noreferrer">
+                                                {{ 'workflow_root_context_mutex' | translate }}
+                                                <span nz-icon nzType="link" nzTheme="outline"></span>
+                                            </a>
+                                        </nz-form-label>
+                                        <nz-form-control>
+                                            <nz-switch
+                                                    name="mutex"
+                                                    [(ngModel)]="node.context.mutex"
+                                                    [nzCheckedChildren]="checkedTemplate"
+                                                    [nzUnCheckedChildren]="unCheckedTemplate"
+                                            ></nz-switch>
+                                            <ng-template #checkedTemplate><i nz-icon nzType="check"></i></ng-template>
+                                            <ng-template #unCheckedTemplate><i nz-icon nzType="close"></i></ng-template>
+                                        </nz-form-control>
+                                    </nz-form-item>
+                                </nz-tab>
+                                <nz-tab nzTitle="Create a new pipeline">
+                                    <nz-form-item>
+                                        <nz-form-label nzFor="cds-field-new-pipeline-name">New pipeline name</nz-form-label>
+                                        <nz-form-control>
+                                            <input nz-input type="text" id="cds-field-new-pipeline-name" name="pipname" [(ngModel)]="newPipeline.name">
+                                        </nz-form-control>
+                                    </nz-form-item>
+                                    <nz-alert nzType="error" *ngIf="errorPipelineNamePattern" nzMessage="Invalid pipeline name. Allowed pattern is: a-zA-Z0-9._-"></nz-alert>
+                                    <nz-form-item>
+                                        <nz-form-label>
+                                            <a href="#" [routerLink]="['/docs', 'docs', 'concepts', 'workflow', 'mutex']" target="_blank" rel="noopener noreferrer">
+                                                {{ 'workflow_root_context_mutex' | translate }}
+                                                <span nz-icon nzType="link" nzTheme="outline"></span>
+                                            </a>
+                                        </nz-form-label>
+                                        <nz-form-control>
+                                            <nz-switch name="mutex"
+                                                    [(ngModel)]="node.context.mutex"
+                                                    [nzCheckedChildren]="checkedTemplate"
+                                                    [nzUnCheckedChildren]="unCheckedTemplate"
+                                            ></nz-switch>
+                                            <ng-template #checkedTemplate><i nz-icon nzType="check"></i></ng-template>
+                                            <ng-template #unCheckedTemplate><i nz-icon nzType="close"></i></ng-template>
+                                        </nz-form-control>
+                                    </nz-form-item>
+                                </nz-tab>
+                            </nz-tabs>
+                        </nz-col>
+                    </nz-row>
+                    <nz-row>
+                        <nz-col [nzSpan]="24">
+                            <button nz-button nzType="primary" type="button" (click)="goToNextSection().subscribe()"
+                                    *ngIf="!hideNext"
+                                    [disabled]="pipIndexTab === 1 && !newPipeline.name" [nzLoading]="loadingCreatePipeline">
+                                Next
+                            </button>
+                            <button nz-button type="button" (click)="goToProject()" *ngIf="!hideCancel">Cancel</button>
+                        </nz-col>
+                    </nz-row>
+                </form>
+                <!-- ############### APPLICATION SECTION ############## -->
+                <form nz-form *ngSwitchCase="1" nzLayout="inline">
+                    <nz-row>
+                        <nz-col [nzSpan]="24">
+                            <nz-tabs [nzAnimated]="false" [(nzSelectedIndex)]="appIndexTab">
+                                <nz-tab nzTitle="Select an existing application">
+                                    <nz-form-item>
+                                        <nz-form-label>Select an application</nz-form-label>
+                                        <nz-form-control>
+                                            <nz-select name="application"
+                                                       nzShowSearch
+                                                       nzPlaceHolder="Select an application..."
+                                                        [(ngModel)]="node.context.application_id"
+                                                       (ngModelChange)="getIntegrations()"
+                                                    id="WorkflowApplicationSelect">
+                                                <nz-option [nzValue]="0" nzLabel="(no application)"></nz-option>
+                                                <nz-option *ngFor="let a of applicationsName" [nzValue]="a.id" [nzLabel]="a.name"></nz-option>
+                                            </nz-select>
+                                        </nz-form-control>
+                                    </nz-form-item>
+                                </nz-tab>
+                                <nz-tab nzTitle="Create a new application">
+                                    <nz-form-item>
+                                        <nz-form-label nzFor="cds-field-new-application-name">New application name</nz-form-label>
+                                        <nz-form-control>
+                                            <input nz-input type="text" id="cds-field-new-application-name" name="appname" [(ngModel)]="newApplication.name">
+                                        </nz-form-control>
+                                    </nz-form-item>
+                                    <nz-alert nzType="error" nzMessage="Invalid application name. Allowed pattern is: a-zA-Z0-9._-" *ngIf="errorPipelineNamePattern"></nz-alert>
+                                </nz-tab>
+                            </nz-tabs>
+                        </nz-col>
+                    </nz-row>
+                    <nz-row>
+                        <nz-col [nzSpan]="24">
+                            <button  nz-button nzType="primary" type="button" (click)="goToNextSection().subscribe()"
+                                    *ngIf="!hideNext"
+                                    [disabled]="appIndexTab === 1 && !newApplication.name" [nzLoading]="loadingCreatePipeline">
+                                Next
+                            </button>
+                            <button nz-button nzType="primary" type="button" *ngIf="!hideNext" (click)="goToPreviousSection()">Previous</button>
+                            <button nz-button type="button" (click)="goToProject()" *ngIf="!hideCancel">Cancel</button>
+                        </nz-col>
+                    </nz-row>
+                </form>
+                <!-- ############### ENVIRONMENT SECTION ############## -->
+                <form nz-form *ngSwitchCase="2" nzLayout="inline">
+                    <nz-row>
+                        <nz-col [nzSpan]="24">
+                            <nz-tabs [nzAnimated]="false" [(nzSelectedIndex)]="envIndexTab">
+                                <nz-tab nzTitle="Select an existing environment">
+                                    <nz-form-item>
+                                        <nz-form-label>Select an environment</nz-form-label>
+                                        <nz-form-control>
+                                            <nz-select nzShowSearch name="env"
+                                                    [(ngModel)]="node.context.environment_id">
+                                                <nz-option [nzValue]="0" nzLabel="(no environment)"></nz-option>
+                                                <nz-option *ngFor="let env of environmentsName" [nzValue]="env.id" [nzLabel]="env.name"></nz-option>
+                                            </nz-select>
+                                        </nz-form-control>
+                                    </nz-form-item>
+                                </nz-tab>
+                                <nz-tab nzTitle="Create a new environment">
+                                    <nz-form-item>
+                                        <nz-form-label nzFor="cds-field-new-environment-name">New environment name</nz-form-label>
+                                        <nz-form-control>
+                                            <input nz-input type="text" id="cds-field-new-environment-name" name="envname" [(ngModel)]="newEnvironment.name">
+                                        </nz-form-control>
+                                    </nz-form-item>
+                                </nz-tab>
+                            </nz-tabs>
+                        </nz-col>
+                    </nz-row>
+                    <nz-row>
+                        <nz-col [nzSpan]="24">
+                            <button nz-button nzType="primary" type="button" *ngIf="!hideNext" (click)="goToNextSection().subscribe()"
+                                    [disabled]="envIndexTab === 1 && !newEnvironment.name" [nzLoading]="loadingCreateEnvironment || loading">
+                                <span *ngIf="node.context.application_id && (loadingIntegrations || (integrations && integrations.length))">Next</span>
+                                <span *ngIf="!node.context.application_id || (!loadingIntegrations && (!integrations || !integrations.length))">Finish</span>
+                            </button>
+                            <button nz-button nzType="primary" type="button" *ngIf="!hideNext" (click)="goToPreviousSection()">Previous</button>
+                            <button nz-button type="button" (click)="goToProject()" *ngIf="!hideCancel">Cancel</button>
+                        </nz-col>
+                    </nz-row>
+                </form>
+                <!-- ############### PLATFORM SECTION ############## -->
+                <form nz-form *ngSwitchCase="3" nzLayout="inline">
+                    <nz-row>
+                        <nz-col [nzSpan]="24">
+                            <nz-form-item>
+                                <nz-form-label>Integration</nz-form-label>
+                                <nz-form-control>
+                                    <nz-select nzShowSearch name="integration"
+                                            [nzLoading]="loadingIntegrations"
+                                            [(ngModel)]="node.context.project_integration_id"
+                                            id="WorkflowIntegrationSelect">
+                                        <nz-option [nzValue]="0" nzLabel="(no integration)"></nz-option>
+                                        <nz-option *ngFor="let integration of integrations" [nzValue]="integration.id" [nzLabel]="integration.name"></nz-option>
+                                    </nz-select>
+                                </nz-form-control>
+                            </nz-form-item>
+                        </nz-col>
+                    </nz-row>
+                    <nz-row>
+                        <nz-col [nzSpan]="24">
+                            <button nz-button nzType="primary" type="button" *ngIf="!hideNext" (click)="goToNextSection().subscribe()"
+                                   [nzLoading]="loading">
+                                Finish
+                            </button>
+                            <button nz-button nzType="primary" type="button" *ngIf="!hideNext" (click)="goToPreviousSection()">Previous</button>
+                            <button nz-button type="button" (click)="goToProject()" *ngIf="!hideCancel">Cancel</button>
+                        </nz-col>
+                    </nz-row>
+                </form>
+            </nz-row>
+        </nz-col>
+    </nz-row>
+</div>

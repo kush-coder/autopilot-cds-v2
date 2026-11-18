@@ -1,0 +1,21 @@
+<div class="workflow-list-lines">
+  <nz-list nzBordered nzSize="small">
+    @for (wf of workflows; track wf) {
+      <a nz-list-item [routerLink]="['./workflow', wf.name]">
+        <div class="content">
+          {{wf.name}}
+        </div>
+        <div>
+          @for (label of wf?.labels?.slice(0, 3); track label) {
+            <nz-tag [nzColor]="label.color">
+              <span style="color: {{label.font_color}}">{{label.name}}</span>
+            </nz-tag>
+          }
+          <nz-tag>
+            ...
+          </nz-tag>
+        </div>
+      </a>
+    }
+  </nz-list>
+</div>

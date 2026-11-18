@@ -1,0 +1,6 @@
+name: docker-debian
+description: my debian worker model
+osarch: linux/amd64
+type: docker
+spec:
+  image: buildpack-deps:bookworm

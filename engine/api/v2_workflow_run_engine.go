@@ -1,0 +1,3216 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"path"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-gorp/gorp"
+	"github.com/jfrog/jfrog-client-go/artifactory/services/utils"
+	"github.com/rockbears/log"
+	"go.opencensus.io/trace"
+
+	art "github.com/ovh/cds/contrib/integrations/artifactory"
+	"github.com/ovh/cds/engine/api/authentication"
+	"github.com/ovh/cds/engine/api/event_v2"
+	"github.com/ovh/cds/engine/api/group"
+	"github.com/ovh/cds/engine/api/organization"
+	"github.com/ovh/cds/engine/api/project"
+	"github.com/ovh/cds/engine/api/rbac"
+	"github.com/ovh/cds/engine/api/region"
+	"github.com/ovh/cds/engine/api/repository"
+	"github.com/ovh/cds/engine/api/services"
+	"github.com/ovh/cds/engine/api/user"
+	"github.com/ovh/cds/engine/api/vcs"
+	"github.com/ovh/cds/engine/api/workflow_v2"
+	"github.com/ovh/cds/engine/cache"
+	"github.com/ovh/cds/sdk"
+	"github.com/ovh/cds/sdk/artifact_manager"
+	cdslog "github.com/ovh/cds/sdk/log"
+	"github.com/ovh/cds/sdk/telemetry"
+)
+
+type prepareJobData struct {
+	wrEnqueue       sdk.V2WorkflowRunEnqueue
+	runJobContext   sdk.WorkflowRunJobsContext
+	existingRunJobs []sdk.V2WorkflowRunJob
+	jobID           string
+	jobToTrigger    JobToTrigger
+	defaultRegion   string
+	regionPermCache map[string]*sdk.V2WorkflowRunJobInfo
+	allVariableSets []sdk.ProjectVariableSet
+}
+
+// TriggerBlockedWorkflowRuns re-enqueues building runs with no job left running, so a lost engine notification
+// doesn't leave them stuck. Runs with a job blocked by a concurrency are legitimately waiting and are skipped.
+func (api *API) TriggerBlockedWorkflowRuns(ctx context.Context) {
+	tickTrigger := time.NewTicker(1 * time.Minute)
+
+	for {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() != nil {
+				log.Error(ctx, "%v", ctx.Err())
+			}
+			return
+		case <-tickTrigger.C:
+			wrs, err := workflow_v2.LoadBuildingRunWithEndedJobs(ctx, api.mustDB())
+			if err != nil {
+				log.ErrorWithStackTrace(ctx, err)
+				continue
+			}
+			for _, wr := range wrs {
+				if err := api.triggerBlockedWorkflowRun(ctx, wr); err != nil {
+					log.ErrorWithStackTrace(ctx, err)
+				}
+			}
+
+		}
+	}
+}
+
+func (api *API) V2WorkflowRunEngineChan(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() != nil {
+				log.Error(ctx, "%v", ctx.Err())
+			}
+			return
+		case wrEnqueue := <-api.workflowRunTriggerChan:
+			ctxTrigger := context.WithValue(ctx, cdslog.WorkflowRunID, wrEnqueue.RunID)
+			if err := api.workflowRunV2Trigger(ctxTrigger, wrEnqueue); err != nil {
+				log.ErrorWithStackTrace(ctxTrigger, err)
+			}
+		}
+	}
+}
+
+func (api *API) V2WorkflowRunEngineDequeue(ctx context.Context) {
+	for {
+		if err := ctx.Err(); err != nil {
+			ctx := sdk.ContextWithStacktrace(ctx, err)
+			log.Error(ctx, "V2WorkflowRunEngine> Exiting: %v", err)
+			return
+		}
+
+		var wrEnqueue sdk.V2WorkflowRunEnqueue
+		if err := api.Cache.DequeueWithContext(ctx, workflow_v2.WorkflowEngineKey, 250*time.Millisecond, &wrEnqueue); err != nil {
+			log.Error(ctx, "V2WorkflowRunEngine> DequeueWithContext err: %v", err)
+			continue
+		}
+		// Compatibility code
+		if wrEnqueue.DeprecatedUserID != "" && wrEnqueue.Initiator.UserID == "" {
+			wrEnqueue.Initiator.UserID = wrEnqueue.DeprecatedUserID
+		}
+		ctxTrigger := context.WithValue(ctx, cdslog.WorkflowRunID, wrEnqueue.RunID)
+		if err := api.workflowRunV2Trigger(ctxTrigger, wrEnqueue); err != nil {
+			log.ErrorWithStackTrace(ctxTrigger, err)
+		}
+	}
+}
+
+// workflowRunV2Trigger runs one engine pass on a run: unlock a blocked run, re-enqueue retrying jobs or apply a
+// forced termination, else compute the jobs that can start, resolve and lock their concurrencies, create and
+// persist the run jobs, then let endWorkflowV2Trigger notify and re-enqueue.
+func (api *API) workflowRunV2Trigger(ctx context.Context, wrEnqueue sdk.V2WorkflowRunEnqueue) error {
+	ctx, next := telemetry.Span(ctx, "api.workflowRunV2Trigger")
+	defer next()
+
+	// One engine pass at a time per run; a concurrent pass is sent back to the queue
+	_, next = telemetry.Span(ctx, "api.workflowRunV2Trigger.lock")
+	lockKey := cache.Key("api:workflow:engine", wrEnqueue.RunID)
+	b, err := api.Cache.Lock(lockKey, 5*time.Minute, 0, 1)
+	if err != nil {
+		next()
+		return err
+	}
+	if !b {
+		log.Debug(ctx, "api.workflowRunV2Trigger> run %s is locked in cache", wrEnqueue.RunID)
+		api.enqueueWorkflowRunLater(wrEnqueue, "", 0, 500*time.Millisecond)
+		next()
+		return nil
+	}
+	next()
+	defer func() {
+		_ = api.Cache.Unlock(lockKey)
+	}()
+
+	// Load run by id
+	run, err := workflow_v2.LoadRunByID(ctx, api.mustDB(), wrEnqueue.RunID)
+	if err != nil {
+		if sdk.ErrorIs(err, sdk.ErrNotFound) {
+			return nil
+		}
+		return sdk.WrapError(err, "unable to load workflow run %s", wrEnqueue.RunID)
+	}
+
+	telemetry.Current(ctx).AddAttributes(
+		trace.StringAttribute(telemetry.TagProjectKey, run.ProjectKey),
+		trace.StringAttribute(telemetry.TagWorkflow, run.WorkflowName),
+		trace.StringAttribute(telemetry.TagWorkflowRunNumber, strconv.FormatInt(run.RunNumber, 10)))
+	ctx = context.WithValue(ctx, cdslog.Project, run.ProjectKey)
+	ctx = context.WithValue(ctx, cdslog.Workflow, run.WorkflowName)
+
+	proj, err := project.Load(ctx, api.mustDB(), run.ProjectKey, project.LoadOptions.WithIntegrations)
+	if err != nil {
+		return err
+	}
+	vcsServer, err := vcs.LoadVCSByIDAndProjectKey(ctx, api.mustDB(), run.ProjectKey, run.VCSServerID)
+	if err != nil {
+		return sdk.WrapError(err, "unable to load vcs server%s", run.VCSServerID)
+	}
+
+	repo, err := repository.LoadRepositoryByID(ctx, api.mustDB(), run.RepositoryID)
+	if err != nil {
+		return sdk.WrapError(err, "unable to load repository %s", run.RepositoryID)
+	}
+
+	if run.Status.IsTerminated() {
+		log.Debug(ctx, "workflow run already on a final state")
+		return nil
+	}
+
+	allRunJobs, err := workflow_v2.LoadRunJobsByRunID(ctx, api.mustDB(), run.ID, run.RunAttempt)
+	if err != nil {
+		return sdk.WrapError(err, "unable to load workflow run jobs for run %s", wrEnqueue.RunID)
+	}
+
+	runJobIds := make([]string, 0, len(allRunJobs))
+	for _, rj := range allRunJobs {
+		runJobIds = append(runJobIds, rj.ID)
+	}
+
+	runResults, err := workflow_v2.LoadRunResultsByRunIDAttempt(ctx, api.mustDB(), run.ID, runJobIds, run.RunAttempt)
+	if err != nil {
+		return sdk.WrapError(err, "unable to load workflow run results for run %s", wrEnqueue.RunID)
+	}
+
+	allrunJobsMap := make(map[string]sdk.V2WorkflowRunJob)
+	allreadyExistRunJobs := make(map[string]struct{})
+	for _, rj := range allRunJobs {
+		allreadyExistRunJobs[rj.ID] = struct{}{}
+		// addition check for matrix job, only keep not terminated one if present
+		runjob, has := allrunJobsMap[rj.JobID]
+		if !has || runjob.Status.IsTerminated() {
+			allrunJobsMap[rj.JobID] = rj
+		}
+	}
+
+	// A run blocked by its concurrency is only released here; its jobs are handled once it is building
+	if wrEnqueue.Status == "" && run.Status == sdk.V2WorkflowRunStatusBlocked && run.Concurrency != nil {
+		return api.workflowRunV2TriggerUnlocking(ctx, run, wrEnqueue)
+	}
+
+	// Manage retrying job
+	hasRetryJob := false
+	for _, rj := range allRunJobs {
+		if rj.Status != sdk.V2WorkflowRunJobStatusRetrying {
+			continue
+		}
+		hasRetryJob = true
+		newRj := sdk.V2WorkflowRunJob{
+			ID:                 "",
+			JobID:              rj.JobID,
+			WorkflowRunID:      rj.WorkflowRunID,
+			ProjectKey:         rj.ProjectKey,
+			VCSServer:          rj.VCSServer,
+			Repository:         rj.Repository,
+			WorkflowName:       rj.WorkflowName,
+			RunNumber:          rj.RunNumber,
+			RunAttempt:         rj.RunAttempt,
+			Retry:              rj.Retry + 1,
+			Status:             sdk.V2WorkflowRunJobStatusWaiting,
+			Job:                rj.Job,
+			DeprecatedUserID:   rj.DeprecatedUserID,
+			DeprecatedUsername: rj.DeprecatedUsername,
+			DeprecatedAdminMFA: rj.DeprecatedAdminMFA,
+			Region:             rj.Region,
+			ModelType:          rj.ModelType,
+			Matrix:             rj.Matrix,
+			ModelOSArch:        rj.ModelOSArch,
+			GateInputs:         rj.GateInputs,
+			Initiator:          rj.Initiator,
+			Concurrency:        rj.Concurrency,
+		}
+		rj.Status = sdk.V2WorkflowRunJobStatusFail
+
+		tx, err := api.mustDB().Begin()
+		if err != nil {
+			return sdk.WithStack(err)
+		}
+		defer tx.Rollback() // nolint
+
+		if err := workflow_v2.InsertRunJob(ctx, tx, &newRj); err != nil {
+			return err
+		}
+		if err := workflow_v2.UpdateJobRun(ctx, tx, &rj); err != nil {
+			return err
+		}
+
+		if err := tx.Commit(); err != nil {
+			return sdk.WithStack(err)
+		}
+		event_v2.PublishRunJobEvent(ctx, api.Cache, sdk.EventRunJobEnqueued, *run, newRj)
+	}
+	if hasRetryJob {
+		api.EnqueueWorkflowRun(ctx, wrEnqueue.RunID, wrEnqueue.Initiator, run.WorkflowName, run.RunNumber)
+		return nil
+	}
+
+	// Force terminate a workflow
+	if wrEnqueue.Status != "" && wrEnqueue.Status.IsTerminated() {
+		var jobStatus sdk.V2WorkflowRunJobStatus
+		var jobMsg, runMsg string
+		switch wrEnqueue.Status {
+		case sdk.V2WorkflowRunStatusCancelled:
+			jobStatus = sdk.V2WorkflowRunJobStatusCancelled
+			jobMsg = "Job cancelled because of workflow cancellation"
+			runMsg = fmt.Sprintf("Workflow cancelled due to concurrency %q", run.Concurrency.Name)
+		default:
+			jobStatus = sdk.V2WorkflowRunJobStatusStopped
+			jobMsg = fmt.Sprintf("Job stopped by user %q", wrEnqueue.Initiator.Username())
+			runMsg = fmt.Sprintf("Workflow stopped by user %q", wrEnqueue.Initiator.Username())
+		}
+		return api.terminateWorkflowRun(ctx, run, wrEnqueue.Status, jobStatus, jobMsg, []sdk.V2WorkflowRunInfo{{
+			WorkflowRunID: run.ID,
+			IssuedAt:      time.Now(),
+			Level:         sdk.WorkflowRunInfoLevelInfo,
+			Message:       runMsg,
+		}}, allrunJobsMap, runResults, wrEnqueue)
+	}
+
+	// Compute all run job contexts
+	runJobsContexts, runGatesContexts := computeExistingRunJobContexts(ctx, allRunJobs, runResults)
+
+	// Compute annotations
+	if err := api.computeWorkflowRunAnnotations(ctx, run, runJobsContexts, runGatesContexts); err != nil {
+		return err
+	}
+
+	// Retrieve jobs that can be queued
+	jobsToQueue, runMsgs, errRetrieve := retrieveJobToQueue(ctx, api.mustDB(), wrEnqueue, run, allRunJobs, allrunJobsMap, runJobsContexts, api.Config.Workflow.JobDefaultRegion)
+	if errRetrieve != nil {
+		return api.terminateWorkflowRun(ctx, run, sdk.V2WorkflowRunStatusFail, sdk.V2WorkflowRunJobStatusStopped, jobStoppedOnRunFailureMsg, runMsgs, allrunJobsMap, runResults, wrEnqueue)
+	}
+
+	// Retrieve variables set to build vars context
+	vss := make([]sdk.ProjectVariableSet, 0, len(run.WorkflowData.Workflow.VariableSets))
+	for _, vs := range run.WorkflowData.Workflow.VariableSets {
+		vsDB, err := project.LoadVariableSetByName(ctx, api.mustDB(), run.ProjectKey, vs)
+		if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+			return err
+		}
+		// If not found stop the run
+		if err != nil {
+			return api.terminateWorkflowRun(ctx, run, sdk.V2WorkflowRunStatusFail, sdk.V2WorkflowRunJobStatusStopped, jobStoppedOnRunFailureMsg, []sdk.V2WorkflowRunInfo{
+				{
+					WorkflowRunID: run.ID,
+					IssuedAt:      time.Now(),
+					Level:         sdk.WorkflowRunInfoLevelError,
+					Message:       fmt.Sprintf("variable set %s not found on project", vs),
+				},
+			}, allrunJobsMap, runResults, wrEnqueue)
+		}
+		vsDB.Items, err = project.LoadVariableSetAllItem(ctx, api.mustDB(), vsDB.ID)
+		if err != nil {
+			return err
+		}
+		vss = append(vss, *vsDB)
+	}
+	variableSetCtx, _, err := buildVarsContext(ctx, vss)
+	if err != nil {
+		return api.terminateWorkflowRun(ctx, run, sdk.V2WorkflowRunStatusFail, sdk.V2WorkflowRunJobStatusStopped, jobStoppedOnRunFailureMsg, []sdk.V2WorkflowRunInfo{
+			{
+				WorkflowRunID: run.ID,
+				IssuedAt:      time.Now(),
+				Level:         sdk.WorkflowRunInfoLevelError,
+				Message:       fmt.Sprintf("unable to compute variableset into job context: %v", err),
+			},
+		}, allrunJobsMap, runResults, wrEnqueue)
+	}
+
+	// Enqueue JOB
+	hasTemplatedJob := false
+	for _, j := range jobsToQueue {
+		if j.Job.NeedsTemplateResolution() {
+			hasTemplatedJob = true
+		}
+	}
+
+	// Retrieve all concurrency definitions + interpolate for jobs to enqueue
+	concurrenciesDef := make(map[string]sdk.V2RunConcurrency)
+	bts, err := json.Marshal(run.Contexts)
+	if err != nil {
+		return api.terminateWorkflowRun(ctx, run, sdk.V2WorkflowRunStatusFail, sdk.V2WorkflowRunJobStatusStopped, jobStoppedOnRunFailureMsg, []sdk.V2WorkflowRunInfo{{
+			WorkflowRunID: run.ID,
+			IssuedAt:      time.Now(),
+			Level:         sdk.WorkflowRunInfoLevelError,
+			Message:       "unable to read run context. Please contact an administrator",
+		}}, allrunJobsMap, runResults, wrEnqueue)
+	}
+	var mapContexts map[string]interface{}
+	if err := json.Unmarshal(bts, &mapContexts); err != nil {
+		return api.terminateWorkflowRun(ctx, run, sdk.V2WorkflowRunStatusFail, sdk.V2WorkflowRunJobStatusStopped, jobStoppedOnRunFailureMsg, []sdk.V2WorkflowRunInfo{{
+			WorkflowRunID: run.ID,
+			IssuedAt:      time.Now(),
+			Level:         sdk.WorkflowRunInfoLevelError,
+			Message:       "unable to read run context. Please contact an administrator",
+		}}, allrunJobsMap, runResults, wrEnqueue)
+	}
+	ap := sdk.NewActionParser(mapContexts, sdk.DefaultFuncs)
+	for jobID, jToTrigger := range jobsToQueue {
+		if jToTrigger.Job.Concurrency == "" {
+			continue
+		}
+		jobConcurrencyDef, err := retrieveConcurrencyDefinition(ctx, api.mustDB(), *run, jToTrigger.Job.Concurrency)
+		if err != nil {
+			return err
+		}
+		if jobConcurrencyDef == nil {
+			runInfo := sdk.V2WorkflowRunInfo{
+				WorkflowRunID: run.ID,
+				IssuedAt:      time.Now(),
+				Level:         sdk.WorkflowRunInfoLevelError,
+				Message:       fmt.Sprintf("Job %s: concurrency %q not found on workflow nor on project", jobID, jToTrigger.Job.Concurrency),
+			}
+			return api.terminateWorkflowRun(ctx, run, sdk.V2WorkflowRunStatusFail, sdk.V2WorkflowRunJobStatusStopped, jobStoppedOnRunFailureMsg, []sdk.V2WorkflowRunInfo{runInfo}, allrunJobsMap, runResults, wrEnqueue)
+		}
+
+		var useConcurrency = true
+		if jobConcurrencyDef.If != "" {
+			if !strings.HasPrefix(jobConcurrencyDef.If, "${{") {
+				jobConcurrencyDef.If = fmt.Sprintf("${{ %s }}", jobConcurrencyDef.If)
+			}
+			useConcurrency, err = ap.InterpolateToBool(ctx, jobConcurrencyDef.If)
+			if err != nil {
+				log.ErrorWithStackTrace(ctx, err)
+				runInfo := sdk.V2WorkflowRunInfo{
+					WorkflowRunID: run.ID,
+					IssuedAt:      time.Now(),
+					Level:         sdk.WorkflowRunInfoLevelError,
+					Message:       fmt.Sprintf("unable to interpolate concurrency %q condition %q: %v", jobConcurrencyDef.Name, jobConcurrencyDef.If, err),
+				}
+				return api.terminateWorkflowRun(ctx, run, sdk.V2WorkflowRunStatusFail, sdk.V2WorkflowRunJobStatusStopped, jobStoppedOnRunFailureMsg, []sdk.V2WorkflowRunInfo{runInfo}, allrunJobsMap, runResults, wrEnqueue)
+			}
+		}
+		if useConcurrency {
+			concurrenciesDef[jobID] = *jobConcurrencyDef
+		}
+	}
+
+	// One concurrency decision at a time across the API: the pool counts come from the database and would race
+	// otherwise. A locked concurrency sends this pass back to the queue.
+	concurrencyLocked := make(map[string]struct{})
+	for _, concu := range concurrenciesDef {
+		concurrencyKey := getConcurrencyUniqueKey(concu, run.ProjectKey, run.VCSServer, run.Repository, run.WorkflowName)
+		if _, has := concurrencyLocked[concurrencyKey]; has {
+			continue
+		}
+		concurrencyLocked[concurrencyKey] = struct{}{}
+		lockKey := cache.Key("api:workflow:concurrency:enqueue", concurrencyKey)
+		b, err := api.Cache.Lock(lockKey, 1*time.Minute, 0, 1)
+		if err != nil {
+			return err
+		}
+		if !b {
+			log.Info(ctx, "concurrency %q already locked", concurrencyKey)
+			api.enqueueWorkflowRunLater(wrEnqueue, run.WorkflowName, run.RunNumber, 2*time.Second)
+			return nil
+		}
+		defer api.Cache.Unlock(lockKey)
+	}
+
+	// Compute worker model / region on runJobs if needed
+	wref, err := NewWorkflowRunEntityFinder(ctx, api.mustDB(), *proj, *run, *repo, *vcsServer, run.WorkflowRef, run.WorkflowSha, api.Config.WorkflowV2.LibraryProjectKey, &wrEnqueue.Initiator)
+	if err != nil {
+		return err
+	}
+	wref.ef.repoCache[vcsServer.Name+"/"+repo.Name] = *repo
+	wref.ef.vcsServerCache[vcsServer.Name] = *vcsServer
+
+	// Prepare run jobs to be enqueued
+	runJobsPrepared, err := prepareRunJobs(ctx, api.mustDB(), api.Cache, proj, wref, run, allRunJobs, variableSetCtx, wrEnqueue, jobsToQueue, runJobsContexts, concurrenciesDef, api.Config.Workflow.JobDefaultRegion, api.matrixParallelism())
+	if err != nil {
+		return err
+	}
+	if runJobsPrepared.errorMsgs != nil {
+		return api.terminateWorkflowRun(ctx, run, sdk.V2WorkflowRunStatusFail, sdk.V2WorkflowRunJobStatusStopped, jobStoppedOnRunFailureMsg, runJobsPrepared.errorMsgs, allrunJobsMap, runResults, wrEnqueue)
+	}
+	runJobs, runObjectToCancel, runJobsInfos, runUpdated := runJobsPrepared.runJobs, runJobsPrepared.runObjectsToCancel, runJobsPrepared.runJobsInfo, runJobsPrepared.runUpdated
+	runMsgs = append(runMsgs, runJobsPrepared.runInfos...)
+
+	tx, errTx := api.mustDB().Begin()
+	if errTx != nil {
+		return sdk.WithStack(errTx)
+	}
+	defer tx.Rollback() // nolint
+
+	hasNoStepsJobs := false
+	for i := range runJobs {
+		rj := &runJobs[i]
+		if len(rj.Job.Steps) == 0 {
+			hasNoStepsJobs = true
+		}
+		if rj.Status.IsTerminated() && (rj.Ended == nil || rj.Ended.IsZero()) {
+			now := time.Now()
+			rj.Ended = &now
+		}
+		if _, has := allreadyExistRunJobs[rj.ID]; !has {
+			if err := workflow_v2.InsertRunJob(ctx, tx, rj); err != nil {
+				return err
+			}
+		} else {
+			if err := workflow_v2.UpdateJobRun(ctx, tx, rj); err != nil {
+				return err
+			}
+		}
+
+		if info, has := runJobsInfos[rj.ID]; has {
+			info.WorkflowRunJobID = rj.ID
+			if err := workflow_v2.InsertRunJobInfo(ctx, tx, &info); err != nil {
+				return err
+			}
+		}
+		if rj.GateInputs != nil {
+			for k, vl := range rj.GateInputs {
+				if k == "manual" {
+					b, ok := vl.(bool)
+					if ok && b {
+						jobInfo := sdk.V2WorkflowRunJobInfo{
+							WorkflowRunID:    rj.WorkflowRunID,
+							Level:            sdk.WorkflowRunInfoLevelInfo,
+							IssuedAt:         time.Now(),
+							WorkflowRunJobID: rj.ID,
+							Message:          wrEnqueue.Initiator.Username() + " triggers manually this job",
+						}
+						if err := workflow_v2.InsertRunJobInfo(ctx, tx, &jobInfo); err != nil {
+							return err
+						}
+					}
+				}
+			}
+
+		}
+	}
+
+	// Save Run message
+	for i := range runMsgs {
+		if err := workflow_v2.InsertRunInfo(ctx, tx, &runMsgs[i]); err != nil {
+			return err
+		}
+	}
+
+	hasSkippedOrFailedJob := false
+	for _, rj := range runJobs {
+		if rj.Status == sdk.V2WorkflowRunJobStatusSkipped || rj.Status == sdk.V2WorkflowRunJobStatusFail {
+			hasSkippedOrFailedJob = true
+			break
+		}
+	}
+
+	// End workflow if there is no more job to handle, no running jobs and current status is not terminated
+	if runUpdated || (len(jobsToQueue) == 0 && !hasSkippedOrFailedJob && !run.Status.IsTerminated()) {
+		finalStatus, err := computeRunStatusFromJobsStatus(ctx, tx, run.ID, run.RunAttempt, len(run.WorkflowData.Workflow.Jobs))
+		if err != nil {
+			return err
+		}
+		if finalStatus != run.Status || runUpdated {
+			run.Status = finalStatus
+		}
+	}
+
+	if err := workflow_v2.UpdateRun(ctx, tx, run); err != nil {
+		return err
+	}
+
+	runsCancelled, runJobsCancelled, err := cancelRunObjects(ctx, tx, runObjectToCancel)
+	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return sdk.WithStack(err)
+	}
+	api.enqueueCancelledRunObjects(ctx, runsCancelled, runJobsCancelled)
+
+	// The definition of the run changed while it was running: jobs coming from a template or a matrix
+	// replaced the job that declared them. Send the new definition so that a run view can redraw its
+	// graph instead of waiting for a manual refresh.
+	// The initiator of the enqueue is not passed on purpose: it may carry a user id without the user
+	// itself, which Username() dereferences, and the engine rewriting the definition is not the doing
+	// of whoever enqueued it. The run reports its own initiator.
+	if runUpdated {
+		event_v2.PublishRunEvent(ctx, api.Cache, sdk.EventRunUpdated, *run, allrunJobsMap, runResults, nil)
+	}
+
+	needReEnqueue := hasSkippedOrFailedJob || hasNoStepsJobs || hasTemplatedJob || runJobsPrepared.reEnqueue
+	api.endWorkflowV2Trigger(ctx, run, allrunJobsMap, runJobs, runResults, wrEnqueue, needReEnqueue)
+
+	return nil
+}
+
+func getConcurrencyUniqueKey(concu sdk.V2RunConcurrency, projKey, vcs, repo, workflow string) string {
+	concurrencyKey := fmt.Sprintf("%s-%s-%s", concu.Scope, projKey, concu.Name)
+	if concu.Scope == sdk.V2RunConcurrencyScopeWorkflow {
+		concurrencyKey = fmt.Sprintf("%s-%s-%s-%s-%s-%s", concu.Scope, projKey, vcs, repo, workflow, concu.Name)
+	}
+	return concurrencyKey
+}
+
+// endWorkflowV2Trigger is the common exit of an engine pass: it hands the slots of the ended jobs and run to the
+// next blocked objects, publishes the events and the outgoing hook event on run end, and re-enqueues when asked.
+func (api *API) endWorkflowV2Trigger(ctx context.Context, run *sdk.V2WorkflowRun, allrunJobsMap map[string]sdk.V2WorkflowRunJob, updatedRunJobs []sdk.V2WorkflowRunJob, runResults []sdk.V2WorkflowRunResult, wrEnqueue sdk.V2WorkflowRunEnqueue, reEnqueue bool) {
+	conccurencyTriggered := make(map[string]struct{})
+	for _, rj := range updatedRunJobs {
+		if rj.Concurrency != nil {
+			concurrencyKey := getConcurrencyUniqueKey(*rj.Concurrency, rj.ProjectKey, rj.VCSServer, rj.Repository, rj.WorkflowName)
+			if _, has := conccurencyTriggered[concurrencyKey]; has {
+				continue
+			}
+			if rj.Status.IsTerminated() {
+				conccurencyTriggered[concurrencyKey] = struct{}{}
+				api.manageEndConcurrency(rj.ProjectKey, rj.VCSServer, rj.Repository, rj.WorkflowName, rj.WorkflowRunID, rj.ID, rj.Concurrency)
+			}
+		}
+	}
+
+	// Synchronize run result in a separate transaction
+	if !run.Status.IsTerminated() {
+		api.GoRoutines.Exec(ctx, "api.synchronizeRunResults", func(ctx context.Context) {
+			if err := api.synchronizeRunResultsNoWait(ctx, api.mustDBWithCtx(ctx), run.ID); err != nil {
+				if sdk.ErrorIs(err, sdk.ErrLocked) {
+					log.Info(ctx, "synchronizeRunResults already lock for run "+run.ID)
+				} else {
+					log.ErrorWithStackTrace(ctx, err)
+				}
+			}
+		})
+	}
+
+	// On workflow end
+	// * Publish end event
+	// * Try to unlocked workflow or jobs  # concurrency
+	// * Send hook event # workflow-run trigger
+	if run.Status.IsTerminated() {
+		// Final synchronization of run results to ensure the build info is complete.
+		// At this point all jobs are terminated so all run results are committed in DB.
+		api.GoRoutines.Exec(ctx, "api.synchronizeRunResults.final", func(ctx context.Context) {
+			if err := api.synchronizeRunResultsWait(ctx, api.mustDBWithCtx(ctx), run.ID); err != nil {
+				log.ErrorWithStackTrace(ctx, err)
+			}
+		})
+
+		// Send event
+		event_v2.PublishRunEvent(ctx, api.Cache, sdk.EventRunEnded, *run, allrunJobsMap, runResults, &wrEnqueue.Initiator)
+
+		// Try to unlocked workflow or jobs
+		if run.Concurrency != nil {
+			concurrencyKey := getConcurrencyUniqueKey(*run.Concurrency, run.ProjectKey, run.VCSServer, run.Repository, run.WorkflowName)
+			if _, has := conccurencyTriggered[concurrencyKey]; !has {
+				api.manageEndConcurrency(run.ProjectKey, run.VCSServer, run.Repository, run.WorkflowName, run.ID, run.ID, run.Concurrency)
+			}
+		}
+
+		// Send event to hook uservice
+		hookServices, err := services.LoadAllByType(ctx, api.mustDB(), sdk.TypeHooks)
+		if err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+		}
+		if len(hookServices) < 1 {
+			log.ErrorWithStackTrace(ctx, sdk.NewErrorFrom(sdk.ErrUnknownError, "unable to find hook service"))
+
+		} else {
+			req := sdk.HookWorkflowRunEvent{
+				WorkflowProject:    run.ProjectKey,
+				WorkflowVCSServer:  run.VCSServer,
+				WorkflowRepository: run.Repository,
+				WorkflowName:       run.WorkflowName,
+				WorkflowStatus:     run.Status,
+				WorkflowRunID:      run.ID,
+				WorkflowRef:        run.Contexts.Git.Ref,
+				Request: sdk.HookWorkflowRunEventRequest{
+					WorkflowRun: sdk.HookWorkflowRunEventRequestWorkflowRun{
+						CDS:                run.Contexts.CDS,
+						Git:                run.Contexts.Git,
+						DeprecatedUserID:   run.Initiator.UserID,
+						DeprecatedUserName: run.Initiator.Username(),
+						Conclusion:         string(run.Status),
+						CreatedAt:          run.Started,
+						Jobs:               make(map[string]sdk.HookWorkflowRunEventJob),
+						Initiator:          wrEnqueue.Initiator,
+					},
+				},
+			}
+			// All jobs are final here; the fallback only lacks the permutations of matrix jobs
+			runJobs, err := workflow_v2.LoadRunJobsByRunID(ctx, api.mustDB(), run.ID, run.RunAttempt)
+			if err != nil {
+				log.ErrorWithStackTrace(ctx, err)
+				for _, rj := range allrunJobsMap {
+					runJobs = append(runJobs, rj)
+				}
+				runJobs = append(runJobs, updatedRunJobs...)
+			}
+			req.Request.WorkflowRun.Jobs = hookJobConclusions(runJobs)
+			if _, _, err := services.NewClient(hookServices).DoJSONRequest(ctx, http.MethodPost, "/v2/workflow/outgoing", req, nil); err != nil {
+				log.ErrorWithStackTrace(ctx, err)
+			}
+		}
+	}
+
+	// Check if we have to reenqueue the same workflow
+	if reEnqueue {
+		api.EnqueueWorkflowRun(ctx, run.ID, wrEnqueue.Initiator, run.WorkflowName, run.RunNumber)
+	}
+
+	// Send to websocket
+	for _, rj := range updatedRunJobs {
+		switch rj.Status {
+		case sdk.V2WorkflowRunJobStatusFail:
+			event_v2.PublishRunJobEvent(ctx, api.Cache, sdk.EventRunJobEnded, *run, rj)
+		case sdk.V2WorkflowRunJobStatusBlocked:
+			event_v2.PublishRunJobEvent(ctx, api.Cache, sdk.EventRunJobBlocked, *run, rj)
+		case sdk.V2WorkflowRunJobStatusCancelled:
+			event_v2.PublishRunJobEvent(ctx, api.Cache, sdk.EventRunJobCancelled, *run, rj)
+		case sdk.V2WorkflowRunJobStatusSkipped:
+			event_v2.PublishRunJobEvent(ctx, api.Cache, sdk.EventRunJobSkipped, *run, rj)
+		case sdk.V2WorkflowRunJobStatusStopped:
+			event_v2.PublishRunJobEvent(ctx, api.Cache, sdk.EventRunJobStopped, *run, rj)
+		default:
+			event_v2.PublishRunJobEvent(ctx, api.Cache, sdk.EventRunJobEnqueued, *run, rj)
+		}
+	}
+}
+
+// Job info set on unfinished jobs when the engine fails the run
+const jobStoppedOnRunFailureMsg = "Job stopped because the workflow run failed"
+
+// terminateWorkflowRun sets unfinished jobs to jobStatus and the run to runStatus, then handles the end of
+// the run: concurrency release, events and hooks.
+func (api *API) terminateWorkflowRun(ctx context.Context, run *sdk.V2WorkflowRun, runStatus sdk.V2WorkflowRunStatus, jobStatus sdk.V2WorkflowRunJobStatus, jobMsg string, runInfos []sdk.V2WorkflowRunInfo, allrunJobsMap map[string]sdk.V2WorkflowRunJob, runResults []sdk.V2WorkflowRunResult, wrEnqueue sdk.V2WorkflowRunEnqueue) error {
+	allRunJobs, err := workflow_v2.LoadRunJobsByRunID(ctx, api.mustDB(), run.ID, run.RunAttempt)
+	if err != nil {
+		return sdk.WrapError(err, "unable to load workflow run jobs for run %s", run.ID)
+	}
+	updatedRunJobs := make([]sdk.V2WorkflowRunJob, 0)
+
+	tx, err := api.mustDB().Begin()
+	if err != nil {
+		return sdk.WithStack(err)
+	}
+	defer tx.Rollback() // nolint
+
+	for _, rj := range allRunJobs {
+		if rj.Status.IsTerminated() {
+			continue
+		}
+		now := time.Now()
+		rj.Status = jobStatus
+		rj.Ended = &now
+		// The worker is cancelled without sending its final step status
+		for k, ss := range rj.StepsStatus {
+			if !ss.Conclusion.IsTerminated() {
+				ss.Conclusion = jobStatus
+				ss.Ended = now
+				rj.StepsStatus[k] = ss
+			}
+		}
+		if err := workflow_v2.UpdateJobRun(ctx, tx, &rj); err != nil {
+			return err
+		}
+		if err := workflow_v2.InsertRunJobInfo(ctx, tx, &sdk.V2WorkflowRunJobInfo{
+			WorkflowRunID:    run.ID,
+			WorkflowRunJobID: rj.ID,
+			IssuedAt:         time.Now(),
+			Level:            sdk.WorkflowRunInfoLevelInfo,
+			Message:          jobMsg,
+		}); err != nil {
+			return err
+		}
+		updatedRunJobs = append(updatedRunJobs, rj)
+		allrunJobsMap[rj.JobID] = rj
+	}
+
+	run.Status = runStatus
+	if err := workflow_v2.UpdateRun(ctx, tx, run); err != nil {
+		return err
+	}
+	for i := range runInfos {
+		if err := workflow_v2.InsertRunInfo(ctx, tx, &runInfos[i]); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return sdk.WithStack(err)
+	}
+
+	api.endWorkflowV2Trigger(ctx, run, allrunJobsMap, updatedRunJobs, runResults, wrEnqueue, false)
+	return nil
+}
+
+func (api *API) computeWorkflowRunAnnotations(ctx context.Context, run *sdk.V2WorkflowRun, runJobsContexts sdk.JobsResultContext, runGatesContexts sdk.JobsGateContext) error {
+	// Build the context that is available for expression syntax
+	computeAnnotationsJosbCtx := make(map[string]sdk.ComputeAnnotationsJobContext)
+	for jobID, jobResult := range runJobsContexts {
+		computeAnnotationsJosbCtx[jobID] = sdk.ComputeAnnotationsJobContext{
+			Results: jobResult,
+			Gate:    runGatesContexts[jobID],
+		}
+	}
+
+	computeAnnotationsCtx := sdk.ComputeAnnotationsContext{
+		WorkflowRunContext: run.Contexts,
+		Jobs:               computeAnnotationsJosbCtx,
+	}
+
+	bts, _ := json.Marshal(computeAnnotationsCtx)
+	var mapContexts map[string]interface{}
+	_ = json.Unmarshal(bts, &mapContexts) // error cannot happen here
+
+	ap := sdk.NewActionParser(mapContexts, sdk.DefaultFuncs)
+
+	for k, v := range run.WorkflowData.Workflow.Annotations {
+		if _, exist := run.Annotations[k]; exist { // If the annotation has already been set: next
+			continue
+		}
+		value, err := ap.InterpolateToString(ctx, v)
+		if err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+			// If error, insert a run info
+			runInfo := sdk.V2WorkflowRunInfo{
+				WorkflowRunID: run.ID,
+				Level:         sdk.WorkflowRunInfoLevelWarning,
+				IssuedAt:      time.Now(),
+				Message:       fmt.Sprintf("unable to compute annotation %q: %v", v, err),
+			}
+			tx, err := api.mustDB().Begin()
+			if err != nil {
+				return sdk.WithStack(err)
+			}
+			if err := workflow_v2.InsertRunInfo(ctx, tx, &runInfo); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if err := tx.Commit(); err != nil {
+				tx.Rollback()
+				return sdk.WithStack(err)
+			}
+			continue
+		}
+		annotationValue := strings.TrimSpace(value)
+		if annotationValue != "" && strings.ToLower(annotationValue) != sdk.FalseString {
+			if run.Annotations == nil {
+				run.Annotations = sdk.WorkflowRunAnnotations{}
+			}
+			run.Annotations[k] = annotationValue
+		}
+	}
+	return nil
+}
+
+type ArtifactSignature map[string]string
+
+// searchSignedArtifacts asks artifactory which of the locations carry a cds signature. The
+// boolean says whether the answer can be trusted. On false the caller reads the properties
+// of each artifact itself.
+func searchSignedArtifacts(ctx context.Context, artifactClient artifact_manager.ArtifactManager, locations []sdk.ArtifactLocation) (map[string]struct{}, bool) {
+	if len(locations) == 0 {
+		return nil, true
+	}
+
+	results, err := artifactClient.SearchItems(ctx, locations, "cds.signature")
+	if err != nil {
+		ctx := log.ContextWithStackTrace(ctx, err)
+		log.Error(ctx, "unable to search for signed artifacts, reading the properties of each result: %v", err)
+		return nil, false
+	}
+
+	signed := make(map[string]struct{}, len(results))
+	for _, r := range results {
+		signed[artifactKey(r.Repo, artifactStoragePath(r.Path, r.Name))] = struct{}{}
+	}
+	return signed, true
+}
+
+// searchFileInfos reads in one query what the signature carries for each location: its path
+// and its checksums, as api/storage would report them. A location missing from the answer,
+// or every location when the query fails, is left to api/storage.
+func searchFileInfos(ctx context.Context, artifactClient artifact_manager.ArtifactManager, locations []sdk.ArtifactLocation) map[string]sdk.FileInfo {
+	if len(locations) == 0 {
+		return nil
+	}
+
+	results, err := artifactClient.SearchItems(ctx, locations, "")
+	if err != nil {
+		ctx := log.ContextWithStackTrace(ctx, err)
+		log.Error(ctx, "unable to search for artifact infos, reading the info of each result: %v", err)
+		return nil
+	}
+
+	fileInfos := make(map[string]sdk.FileInfo, len(results))
+	for _, r := range results {
+		fi := sdk.FileInfo{Repo: r.Repo, Path: artifactStoragePath(r.Path, r.Name)}
+		// api/storage reports no checksums for a folder
+		if r.Type != "folder" {
+			fi.Checksums = &sdk.FileInfoChecksum{Md5: r.ActualMD5, Sha1: r.ActualSHA1, Sha256: r.SHA256}
+		}
+		fileInfos[artifactKey(r.Repo, fi.Path)] = fi
+	}
+	return fileInfos
+}
+
+func artifactLocation(repository, filePath string) sdk.ArtifactLocation {
+	directory, name := path.Split(strings.TrimPrefix(filePath, "/"))
+	directory = strings.TrimSuffix(directory, "/")
+	if directory == "" {
+		// how artifactory reports an item sitting at the root of a repository
+		directory = "."
+	}
+	return sdk.ArtifactLocation{Repository: repository, Path: directory, Name: name}
+}
+
+// The inverse of artifactLocation: the path as api/storage reports it.
+func artifactStoragePath(directory, name string) string {
+	if directory == "." {
+		return "/" + name
+	}
+	return "/" + directory + "/" + name
+}
+
+func artifactKey(repository, filePath string) string {
+	// neither a repository name nor a path can hold a nul byte
+	return repository + "\x00" + filePath
+}
+
+/*
+synchronizeRunResults : for a runID, this func:
+- get the integration ArtifactManager on the workflow if exist
+- for each run results, add properties and signed properties
+- delete build, then create build info.
+
+This version tries to acquire the lock without waiting. If the lock is already held, it returns ErrLocked.
+*/
+func (api *API) synchronizeRunResultsNoWait(ctx context.Context, db gorp.SqlExecutor, runID string) error {
+	lockKey := cache.Key("api:workflow:sync:results:run", runID)
+	b, err := api.Cache.Lock(lockKey, 1*time.Minute, 0, 1)
+	if err != nil {
+		return err
+	}
+	if !b {
+		return sdk.WithStack(sdk.ErrLocked)
+	}
+	defer func() {
+		_ = api.Cache.Unlock(lockKey)
+	}()
+	return api.synchronizeRunResults(ctx, db, runID)
+}
+
+/*
+synchronizeRunResultsFinal : same as synchronizeRunResults but waits for the lock.
+Used when the workflow run is terminated to ensure a final complete build info.
+*/
+func (api *API) synchronizeRunResultsWait(ctx context.Context, db gorp.SqlExecutor, runID string) error {
+	lockKey := cache.Key("api:workflow:sync:results:run", runID)
+	// Wait up to 2 minutes to acquire the lock (retry every 500ms, 240 attempts)
+	b, err := api.Cache.Lock(lockKey, 1*time.Minute, 500, 240)
+	if err != nil {
+		return err
+	}
+	if !b {
+		return sdk.WithStack(sdk.ErrLocked)
+	}
+	defer func() {
+		_ = api.Cache.Unlock(lockKey)
+	}()
+	return api.synchronizeRunResults(ctx, db, runID)
+}
+
+func (api *API) synchronizeRunResults(ctx context.Context, db gorp.SqlExecutor, runID string) error {
+	run, err := workflow_v2.LoadRunByID(ctx, db, runID)
+	if err != nil {
+		return err
+	}
+
+	proj, err := project.Load(ctx, db, run.ProjectKey, project.LoadOptions.WithClearIntegrations)
+	if err != nil {
+		return err
+	}
+
+	allRunJobs, err := workflow_v2.LoadRunJobsByRunID(ctx, api.mustDB(), run.ID, run.RunAttempt)
+	if err != nil {
+		return sdk.WrapError(err, "unable to load workflow run jobs for run %s", run.ID)
+	}
+
+	runJobIds := make([]string, 0, len(allRunJobs))
+	runJobsByID := make(map[string]sdk.V2WorkflowRunJob, len(allRunJobs))
+	for _, rj := range allRunJobs {
+		runJobIds = append(runJobIds, rj.ID)
+		runJobsByID[rj.ID] = rj
+	}
+
+	runResults, err := workflow_v2.LoadRunResultsByRunIDAttempt(ctx, db, runID, runJobIds, run.RunAttempt)
+	if err != nil {
+		return err
+	}
+
+	// Prepare artifactClient if available
+	// Only one artifact_manager integration is available on a workflow run
+	var (
+		artifactClient         artifact_manager.ArtifactManager
+		artifactoryIntegration *sdk.ProjectIntegration
+		rtToken                string
+		rtTokenName            string
+		rtURL                  string
+		artifactoryProjectKey  string
+	)
+
+	var integrations []sdk.ProjectIntegration
+	for _, integName := range run.WorkflowData.Workflow.Integrations {
+		for i := range proj.Integrations {
+			if proj.Integrations[i].Name == integName {
+				integrations = append(integrations, proj.Integrations[i])
+				break
+			}
+		}
+	}
+
+	for i := range integrations {
+		integ := integrations[i]
+
+		if integ.Model.ArtifactManager {
+			rtName := integ.Config[sdk.ArtifactoryConfigPlatform].Value
+			rtURL = integ.Config[sdk.ArtifactoryConfigURL].Value
+			rtToken = integ.Config[sdk.ArtifactoryConfigToken].Value
+			rtTokenName = integ.Config[sdk.ArtifactoryConfigTokenName].Value
+			artifactoryProjectKey = integ.Config[sdk.ArtifactoryConfigProjectKey].Value
+
+			var err error
+			artifactClient, err = artifact_manager.NewClient(rtName, rtURL, rtToken)
+			if err != nil {
+				return err
+			}
+			artifactoryIntegration = &integ
+			break
+		}
+	}
+
+	if artifactClient == nil || artifactoryIntegration == nil {
+		return nil
+	}
+
+	// First pass: resolve where each result lives. The signature probe below wants the
+	// whole list in one query.
+	type syncTarget struct {
+		result      *sdk.V2WorkflowRunResult
+		packageType string
+		localRepo   string
+		filePath    string
+	}
+
+	// One repository is shared by many run results
+	repositoryPackageTypes := make(map[string]string)
+	targets := make([]syncTarget, 0, len(runResults))
+	locations := make([]sdk.ArtifactLocation, 0, len(runResults))
+
+	for i := range runResults {
+		result := &runResults[i]
+
+		if result.ArtifactManagerIntegrationName == nil {
+			continue
+		}
+		if result.DataSync == nil {
+			result.DataSync = new(sdk.WorkflowRunResultSync)
+		}
+
+		latestPromotion := result.DataSync.LatestPromotionOrRelease()
+		currentMaturity := result.ArtifactManagerMetadata.Get("maturity")
+		if latestPromotion != nil && currentMaturity != latestPromotion.ToMaturity {
+			return sdk.Errorf("desynchronized maturity and promotion on run result %s", result.ID)
+		}
+
+		localRepository := result.ArtifactManagerMetadata.Get("localRepository")
+
+		packageType, has := repositoryPackageTypes[localRepository]
+		if !has {
+			repoDetails, err := artifactClient.GetRepository(localRepository)
+			if err != nil {
+				log.Error(ctx, "unable to get repository %q fror result %s: %v", localRepository, result.ID, err)
+				continue
+			}
+			packageType = repoDetails.PackageType
+			repositoryPackageTypes[localRepository] = packageType
+		}
+
+		// To get FileInfo for a docker image, we have to check the manifest file
+		filePath := result.ArtifactManagerMetadata.Get("path")
+		if packageType == "docker" && !strings.HasSuffix(filePath, "manifest.json") {
+			filePath = path.Join(filePath, "manifest.json")
+		}
+		filePath = "/" + strings.TrimPrefix(filePath, "/")
+
+		targets = append(targets, syncTarget{
+			result:      result,
+			packageType: packageType,
+			localRepo:   localRepository,
+			filePath:    filePath,
+		})
+		locations = append(locations, artifactLocation(localRepository, filePath))
+	}
+
+	// One query for the signatures of the whole run. A release re-synchronizes a run whose
+	// artifacts are all signed already, and this runs inside the worker request.
+	signedArtifacts, probed := searchSignedArtifacts(ctx, artifactClient, locations)
+
+	var nbSigned, nbReadOneByOne int
+	toSign := make([]syncTarget, 0, len(targets))
+	toSignLocations := make([]sdk.ArtifactLocation, 0, len(targets))
+	for _, target := range targets {
+		result := target.result
+		localRepository := target.localRepo
+		filePath := target.filePath
+
+		var alreadySigned bool
+		if probed {
+			_, alreadySigned = signedArtifacts[artifactKey(localRepository, filePath)]
+		} else {
+			nbReadOneByOne++
+			existingProperties, err := artifactClient.GetProperties(localRepository, filePath)
+			if err != nil && !strings.Contains(err.Error(), "404") {
+				ctx := log.ContextWithStackTrace(ctx, err)
+				log.Error(ctx, "unable to get artifact properties from result %s: %v", result.ID, err)
+				continue
+			}
+			alreadySigned = sdk.MapHasKeys(existingProperties, "cds.signature")
+		}
+
+		if alreadySigned {
+			nbSigned++
+			log.Debug(ctx, "artifact is already signed by cds")
+			continue
+		}
+
+		toSign = append(toSign, target)
+		toSignLocations = append(toSignLocations, artifactLocation(localRepository, filePath))
+	}
+
+	// One query for the path and checksums to sign, in place of one api/storage call per artifact
+	fileInfos := searchFileInfos(ctx, artifactClient, toSignLocations)
+
+	var nbInfoReadOneByOne int
+	for _, target := range toSign {
+		result := target.result
+		localRepository := target.localRepo
+		filePath := target.filePath
+
+		jobRun, has := runJobsByID[result.WorkflowRunJobID]
+		if !has {
+			log.Error(ctx, "unable to find run job %s of result %s", result.WorkflowRunJobID, result.ID)
+			continue
+		}
+
+		fi, has := fileInfos[artifactKey(localRepository, filePath)]
+		if !has {
+			nbInfoReadOneByOne++
+			var err error
+			fi, err = artifactClient.GetFileInfo(localRepository, filePath)
+			if err != nil {
+				ctx := log.ContextWithStackTrace(ctx, err)
+				log.Error(ctx, "unable to get artifact info from result %s: %v", result.ID, err)
+				continue
+			}
+		}
+
+		// Set the properties
+		virtualRepository := result.ArtifactManagerMetadata.Get("repository")
+		name := result.ArtifactManagerMetadata.Get("name")
+
+		// Push git properties as artifact properties
+		props := utils.NewProperties()
+		signedProps := make(ArtifactSignature)
+
+		props.AddProperty("cds.project", run.ProjectKey)
+		signedProps["cds.project"] = run.ProjectKey
+		props.AddProperty("cds.workflow", run.WorkflowName)
+		signedProps["cds.workflow"] = run.WorkflowName
+		props.AddProperty("cds.version", run.Contexts.CDS.Version)
+		signedProps["cds.version"] = run.Contexts.CDS.Version
+		props.AddProperty("cds.run", strconv.FormatInt(run.RunNumber, 10))
+		signedProps["cds.run"] = strconv.FormatInt(run.RunNumber, 10)
+		props.AddProperty("git.url", run.Contexts.Git.RepositoryURL)
+		signedProps["git.url"] = run.Contexts.Git.RepositoryURL
+		props.AddProperty("git.hash", run.Contexts.Git.Sha)
+		signedProps["git.hash"] = run.Contexts.Git.Sha
+		props.AddProperty("git.ref", run.Contexts.Git.Ref)
+		signedProps["git.ref"] = run.Contexts.Git.Ref
+		props.AddProperty("cds.run_id", runID)
+		signedProps["cds.run_id"] = runID
+		signedProps["cds.region"] = jobRun.Region
+		signedProps["cds.worker"] = jobRun.WorkerName
+		signedProps["cds.hatchery"] = jobRun.HatcheryName
+
+		// Prepare artifact signature
+		signedProps["repository"] = virtualRepository
+		signedProps["type"] = target.packageType
+		signedProps["path"] = fi.Path
+		signedProps["name"] = name
+
+		if fi.Checksums == nil {
+			log.Error(ctx, "unable to get checksums for artifact %s %s", name, fi.Path)
+		} else {
+			signedProps["md5"] = fi.Checksums.Md5
+			signedProps["sha1"] = fi.Checksums.Sha1
+			signedProps["sha256"] = fi.Checksums.Sha256
+		}
+
+		// Sign the properties with main CDS authentication key pair
+		signature, err := authentication.SignJWS(signedProps, time.Now(), 0)
+		if err != nil {
+			ctx := log.ContextWithStackTrace(ctx, err)
+			log.Error(ctx, "unable to get artifact properties from result %s: %v", result.ID, err)
+			continue
+		}
+		props.AddProperty("cds.signature", signature)
+
+		pathToApplySet := fi.Path
+		// If dir property exist (for artifact manifest.json or list.manifest.json), we'll use it to SetProperties
+		if result.ArtifactManagerMetadata.Get("dir") != "" {
+			pathToApplySet = result.ArtifactManagerMetadata.Get("dir")
+		}
+
+		log.Info(ctx, "setProperties artifact %s%s signature: %s", localRepository, pathToApplySet, signature)
+		if err := artifactClient.SetProperties(localRepository, pathToApplySet, props); err != nil {
+			ctx := log.ContextWithStackTrace(ctx, err)
+			log.Error(ctx, "unable to set artifact properties from result %s: %v", result.ID, err)
+			continue
+		}
+
+		// Check docker multi arch manifest
+		if result.Type == sdk.V2WorkflowRunResultTypeDocker {
+			details, err := sdk.GetConcreteDetail[*sdk.V2WorkflowRunResultDockerDetail](result)
+			if err != nil {
+				ctx := log.ContextWithStackTrace(ctx, err)
+				log.Error(ctx, "unable to set artifact properties from result %s: %v", result.ID, err)
+				continue
+			}
+			for _, m := range details.Manifests {
+				manifestDir := filepath.Dir(m.Path)
+				if err := artifactClient.SetProperties(localRepository, manifestDir, props); err != nil {
+					ctx := log.ContextWithStackTrace(ctx, err)
+					log.Error(ctx, "unable to set artifact properties from result %s on sub layers %s: %v", result.ID, manifestDir, err)
+					continue
+				}
+			}
+		}
+	}
+
+	log.Info(ctx, "synchronizeRunResults on run %s: %d artifacts, %d already signed, %d properties read one by one, %d infos read one by one",
+		runID, len(targets), nbSigned, nbReadOneByOne, nbInfoReadOneByOne)
+
+	// Set the Buildinfo
+	buildInfoRequest, err := art.PrepareBuildInfo(ctx, artifactClient, art.BuildInfoRequest{
+		BuildInfoPrefix:          artifactoryIntegration.Config[sdk.ArtifactoryConfigBuildInfoPrefix].Value,
+		ProjectKey:               run.ProjectKey,
+		VCS:                      run.Contexts.CDS.WorkflowVCSServer,
+		Repository:               run.Contexts.CDS.WorkflowRepository,
+		WorkflowName:             run.WorkflowName,
+		Version:                  run.Contexts.CDS.Version,
+		AgentName:                "cds-api",
+		TokenName:                rtTokenName,
+		RunURL:                   fmt.Sprintf("%s/project/%s/run/%s", api.Config.URL.UI, run.ProjectKey, runID),
+		GitBranch:                run.Contexts.Git.Ref,
+		GitURL:                   run.Contexts.Git.RepositoryURL,
+		GitHash:                  run.Contexts.Git.Sha,
+		RunResultsV2:             runResults,
+		DefaultLowMaturitySuffix: artifactoryIntegration.Config[sdk.ArtifactoryConfigPromotionLowMaturity].Value,
+	})
+	if err != nil {
+		log.ErrorWithStackTrace(ctx, err)
+		return err
+	}
+
+	log.Info(ctx, "Creating Artifactory Build %s %s on project %s...", buildInfoRequest.Name, buildInfoRequest.Number, artifactoryProjectKey)
+
+	if err := artifactClient.DeleteBuild(artifactoryProjectKey, buildInfoRequest.Name, buildInfoRequest.Number); err != nil {
+		log.ErrorWithStackTrace(ctx, err)
+	}
+
+	var nbAttempts int
+	for {
+		nbAttempts++
+		err := artifactClient.PublishBuildInfo(artifactoryProjectKey, buildInfoRequest)
+		if err == nil {
+			break
+		} else if nbAttempts >= 3 {
+			log.ErrorWithStackTrace(ctx, err)
+			break
+		} else {
+			log.Error(ctx, "error while pushing buildinfo %s %s. Retrying...", buildInfoRequest.Name, buildInfoRequest.Number)
+		}
+	}
+
+	return nil
+}
+
+// buildJobIntegrationsContext builds a JobIntegrationsContexts from project integrations
+// and the integration names declared at job and workflow level.
+// Job-level integrations take priority over workflow-level integrations.
+func buildJobIntegrationsContext(projectIntegrations []sdk.ProjectIntegration, jobIntegrations, workflowIntegrations []string) *sdk.JobIntegrationsContexts {
+	result := &sdk.JobIntegrationsContexts{}
+
+	matchIntegration := func(name string) {
+		if strings.Contains(name, "${{") {
+			return // skip unresolved dynamic names
+		}
+		var integ *sdk.ProjectIntegration
+		for i := range projectIntegrations {
+			if projectIntegrations[i].Name == name {
+				integ = &projectIntegrations[i]
+				break
+			}
+		}
+		if integ == nil {
+			return
+		}
+		switch {
+		case integ.Model.ArtifactManager:
+			if result.ArtifactManager.Name != "" {
+				return // already set by job integration
+			}
+			result.ArtifactManager = sdk.JobIntegrationsContext{
+				Name:      integ.Name,
+				Config:    integ.ToJobRunContextConfig(),
+				ModelName: integ.Model.Name,
+			}
+		case integ.Model.Deployment:
+			if result.Deployment.Name != "" {
+				return // already set by job integration
+			}
+			result.Deployment = sdk.JobIntegrationsContext{
+				Name:      integ.Name,
+				Config:    integ.ToJobRunContextConfig(),
+				ModelName: integ.Model.Name,
+			}
+		}
+	}
+
+	// Job integrations first (take priority)
+	for _, name := range jobIntegrations {
+		matchIntegration(name)
+	}
+	// Then workflow integrations
+	for _, name := range workflowIntegrations {
+		matchIntegration(name)
+	}
+
+	return result
+}
+
+func computeRunJobsInterpolation(ctx context.Context, db *gorp.DbMap, store cache.Store, wref *WorkflowRunEntityFinder, run *sdk.V2WorkflowRun, rj *sdk.V2WorkflowRunJob, defaultRegion string, regionPermCache map[string]*sdk.V2WorkflowRunJobInfo, jobContext sdk.WorkflowRunJobsContext, wrEnqueue sdk.V2WorkflowRunEnqueue) (*sdk.V2WorkflowRunJobInfo, bool) {
+	runUpdated := false
+	if rj.Status.IsTerminated() {
+		return nil, false
+	}
+
+	bts, _ := json.Marshal(jobContext)
+	var mapContexts map[string]interface{}
+	if err := json.Unmarshal(bts, &mapContexts); err != nil {
+		rj.Status = sdk.V2WorkflowRunJobStatusFail
+		return &sdk.V2WorkflowRunJobInfo{
+			WorkflowRunID: run.ID,
+			Level:         sdk.WorkflowRunInfoLevelError,
+			IssuedAt:      time.Now(),
+			Message:       fmt.Sprintf("Job %s: unable to build context to compute worker model: %v", rj.JobID, err),
+		}, false
+	}
+
+	ap := sdk.NewActionParser(mapContexts, sdk.DefaultFuncs)
+
+	for i, integ := range rj.Job.Integrations {
+		if strings.Contains(integ, "${{") {
+			integName, err := ap.InterpolateToString(ctx, integ)
+			if err != nil {
+				rj.Status = sdk.V2WorkflowRunJobStatusFail
+				return &sdk.V2WorkflowRunJobInfo{
+					WorkflowRunID:    run.ID,
+					Level:            sdk.WorkflowRunInfoLevelError,
+					WorkflowRunJobID: rj.ID,
+					IssuedAt:         time.Now(),
+					Message:          fmt.Sprintf("Job %s: unable to interpolate integration %s into a string: %v", rj.JobID, integ, err),
+				}, false
+			}
+			rj.Job.Integrations[i] = integName
+			foundInteg := false
+		integLoop:
+			for _, pi := range wref.project.Integrations {
+				if pi.Name != integName {
+					continue
+				}
+				foundInteg = true
+				for _, v := range pi.Config {
+					if v.Type == sdk.IntegrationConfigTypeRegion {
+						rj.Job.Region = v.Value
+						rj.Region = v.Value
+						runUpdated = true
+						break integLoop
+					}
+				}
+			}
+			if !foundInteg {
+				rj.Status = sdk.V2WorkflowRunJobStatusFail
+				return &sdk.V2WorkflowRunJobInfo{
+					WorkflowRunID:    run.ID,
+					Level:            sdk.WorkflowRunInfoLevelError,
+					WorkflowRunJobID: rj.ID,
+					IssuedAt:         time.Now(),
+					Message:          fmt.Sprintf("Job %s: unable to find integration %s: %v", rj.JobID, integName, err),
+				}, false
+			}
+
+			// Rebuild integrations context after resolving a dynamic integration name,
+			// so that the integrations.* context is available for subsequent interpolations (runs-on, etc.).
+			newIntegCtx := buildJobIntegrationsContext(wref.project.Integrations, rj.Job.Integrations, run.WorkflowData.Workflow.Integrations)
+			integBts, _ := json.Marshal(newIntegCtx)
+			var integMap interface{}
+			_ = json.Unmarshal(integBts, &integMap)
+			mapContexts["integrations"] = integMap
+			ap = sdk.NewActionParser(mapContexts, sdk.DefaultFuncs)
+		}
+	}
+
+	if strings.Contains(rj.Job.Name, "${{") {
+		jobName, err := ap.InterpolateToString(ctx, rj.Job.Name)
+		if err != nil {
+			rj.Status = sdk.V2WorkflowRunJobStatusFail
+			return &sdk.V2WorkflowRunJobInfo{
+				WorkflowRunID:    run.ID,
+				Level:            sdk.WorkflowRunInfoLevelError,
+				WorkflowRunJobID: rj.ID,
+				IssuedAt:         time.Now(),
+				Message:          fmt.Sprintf("Job %s: unable to interpolate job name %s into a string: %v", rj.JobID, rj.Job.Name, err),
+			}, false
+		}
+		rj.Job.Name = jobName
+		runUpdated = true
+	}
+
+	regionInterpolated := false
+	if strings.HasPrefix(rj.Job.Region, "${{") {
+		regionInterpolated = true
+		reg, err := ap.InterpolateToString(ctx, rj.Job.Region)
+		if err != nil {
+			rj.Status = sdk.V2WorkflowRunJobStatusFail
+			return &sdk.V2WorkflowRunJobInfo{
+				WorkflowRunID:    run.ID,
+				Level:            sdk.WorkflowRunInfoLevelError,
+				WorkflowRunJobID: rj.ID,
+				IssuedAt:         time.Now(),
+				Message:          fmt.Sprintf("Job %s: unable to interpolate region %s into a string: %v", rj.JobID, rj.Job.Region, err),
+			}, false
+		}
+		rj.Region = reg
+		rj.Job.Region = reg
+		runUpdated = true
+	}
+
+	if rj.Region == "" && len(rj.Job.Integrations) > 0 {
+	regionLoop:
+		for _, jobInt := range rj.Job.Integrations {
+
+			for _, integ := range wref.project.Integrations {
+				if integ.Name != jobInt {
+					continue
+				}
+				for _, v := range integ.Config {
+					if v.Type == sdk.IntegrationConfigTypeRegion {
+						rj.Job.Region = v.Value
+						rj.Region = v.Value
+						runUpdated = true
+						break regionLoop
+					}
+				}
+			}
+
+		}
+	}
+
+	// Check user region right.
+	if rj.Region == "" {
+		rj.Job.Region = defaultRegion
+		rj.Region = defaultRegion
+	}
+	jobInfoMsg, has := regionPermCache[rj.Region]
+	if !has {
+		var err error
+		jobInfoMsg, err = checkUserRegionRight(ctx, db, rj, wrEnqueue, rj.Region)
+		if err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+			rj.Status = sdk.V2WorkflowRunJobStatusFail
+			return &sdk.V2WorkflowRunJobInfo{
+				WorkflowRunID:    run.ID,
+				Level:            sdk.WorkflowRunInfoLevelError,
+				WorkflowRunJobID: rj.ID,
+				IssuedAt:         time.Now(),
+				Message:          fmt.Sprintf("job %s: unable to check right for user %s: %v", rj.JobID, rj.Initiator.Username(), err),
+			}, false
+		}
+		regionPermCache[rj.Region] = jobInfoMsg
+	}
+
+	if jobInfoMsg != nil {
+		rj.Status = sdk.V2WorkflowRunJobStatusSkipped
+		return jobInfoMsg, false
+	}
+
+	if strings.Contains(rj.Job.RunsOn.Model, "${{") || regionInterpolated {
+		model, err := ap.InterpolateToString(ctx, rj.Job.RunsOn.Model)
+		if err != nil {
+			rj.Status = sdk.V2WorkflowRunJobStatusFail
+			return &sdk.V2WorkflowRunJobInfo{
+				WorkflowRunID:    run.ID,
+				Level:            sdk.WorkflowRunInfoLevelError,
+				WorkflowRunJobID: rj.ID,
+				IssuedAt:         time.Now(),
+				Message:          fmt.Sprintf("Job %s: unable to interpolate %s into a string: %v", rj.JobID, rj.Job.RunsOn.Model, err),
+			}, false
+		}
+		completeName, msg, err := wref.checkWorkerModel(ctx, db, store, rj.JobID, model, rj.Region, "")
+		if err != nil {
+			rj.Status = sdk.V2WorkflowRunJobStatusFail
+			return &sdk.V2WorkflowRunJobInfo{
+				WorkflowRunID:    run.ID,
+				Level:            sdk.WorkflowRunInfoLevelError,
+				WorkflowRunJobID: rj.ID,
+				IssuedAt:         time.Now(),
+				Message:          fmt.Sprintf("%v", err),
+			}, false
+		}
+		if msg != nil {
+			rj.Status = sdk.V2WorkflowRunJobStatusFail
+			return &sdk.V2WorkflowRunJobInfo{
+				WorkflowRunID:    run.ID,
+				Level:            sdk.WorkflowRunInfoLevelError,
+				WorkflowRunJobID: rj.ID,
+				IssuedAt:         time.Now(),
+				Message:          msg.Message,
+			}, false
+		}
+		if strings.HasPrefix(model, ".cds/worker-models/") {
+			rj.ModelType = wref.ef.localWorkerModelCache[model].Model.Type
+			rj.ModelOSArch = wref.ef.localWorkerModelCache[model].Model.OSArch
+		} else {
+			rj.ModelType = wref.ef.workerModelCache[completeName].Model.Type
+			rj.ModelOSArch = wref.ef.workerModelCache[completeName].Model.OSArch
+		}
+		rj.Job.RunsOn.Model = completeName
+		runUpdated = true
+	}
+	if strings.HasPrefix(rj.Job.RunsOn.Flavor, "${{") {
+		flavor, err := ap.InterpolateToString(ctx, rj.Job.RunsOn.Flavor)
+		if err != nil {
+			rj.Status = sdk.V2WorkflowRunJobStatusFail
+			return &sdk.V2WorkflowRunJobInfo{
+				WorkflowRunID:    run.ID,
+				Level:            sdk.WorkflowRunInfoLevelError,
+				WorkflowRunJobID: rj.ID,
+				IssuedAt:         time.Now(),
+				Message:          fmt.Sprintf("Job %s: unable to interpolate %s into a string: %v", rj.JobID, rj.Job.RunsOn.Flavor, err),
+			}, false
+		}
+		rj.Job.RunsOn.Flavor = flavor
+		runUpdated = true
+	}
+	if strings.HasPrefix(rj.Job.RunsOn.Memory, "${{") {
+		mem, err := ap.InterpolateToString(ctx, rj.Job.RunsOn.Memory)
+		if err != nil {
+			rj.Status = sdk.V2WorkflowRunJobStatusFail
+			return &sdk.V2WorkflowRunJobInfo{
+				WorkflowRunID:    run.ID,
+				Level:            sdk.WorkflowRunInfoLevelError,
+				WorkflowRunJobID: rj.ID,
+				IssuedAt:         time.Now(),
+				Message:          fmt.Sprintf("Job %s: unable to interpolate %s into a string: %v", rj.JobID, rj.Job.RunsOn.Memory, err),
+			}, false
+		}
+		rj.Job.RunsOn.Memory = mem
+		runUpdated = true
+	}
+
+	for k, s := range rj.Job.Services {
+		if strings.Contains(s.Image, "${{") {
+			img, err := ap.InterpolateToString(ctx, s.Image)
+			if err != nil {
+				rj.Status = sdk.V2WorkflowRunJobStatusFail
+				return &sdk.V2WorkflowRunJobInfo{
+					WorkflowRunID:    run.ID,
+					Level:            sdk.WorkflowRunInfoLevelError,
+					WorkflowRunJobID: rj.ID,
+					IssuedAt:         time.Now(),
+					Message:          fmt.Sprintf("Job %s: unable to interpolate %q into a string: %v", rj.JobID, s.Image, err),
+				}, false
+			}
+			s.Image = img
+			rj.Job.Services[k] = s
+			runUpdated = true
+		}
+		if strings.Contains(s.Readiness.Command, "${{") {
+			cmd, err := ap.InterpolateToString(ctx, s.Readiness.Command)
+			if err != nil {
+				rj.Status = sdk.V2WorkflowRunJobStatusFail
+				return &sdk.V2WorkflowRunJobInfo{
+					WorkflowRunID:    run.ID,
+					Level:            sdk.WorkflowRunInfoLevelError,
+					WorkflowRunJobID: rj.ID,
+					IssuedAt:         time.Now(),
+					Message:          fmt.Sprintf("Job %s: unable to interpolate %q into a string: %v", rj.JobID, s.Readiness.Command, err),
+				}, false
+			}
+			s.Readiness.Command = cmd
+			rj.Job.Services[k] = s
+			runUpdated = true
+		}
+	}
+
+	for _, def := range wref.ef.localWorkerModelCache {
+		completeName := fmt.Sprintf("%s/%s/%s/%s@%s", wref.run.ProjectKey, wref.ef.currentVCS.Name, wref.ef.currentRepo.Name, def.Model.Name, wref.run.WorkflowRef)
+		if _, has := run.WorkflowData.WorkerModels[completeName]; !has {
+			runUpdated = true
+			run.WorkflowData.WorkerModels[completeName] = def.Model
+		}
+	}
+	for name, def := range wref.ef.workerModelCache {
+		if _, has := run.WorkflowData.WorkerModels[name]; !has {
+			runUpdated = true
+			run.WorkflowData.WorkerModels[name] = def.Model
+		}
+	}
+
+	return nil, runUpdated
+}
+
+// prepareRunJobsResult is what an engine pass has to persist for the jobs it enqueues
+type prepareRunJobsResult struct {
+	runJobs            []sdk.V2WorkflowRunJob
+	runObjectsToCancel map[string]workflow_v2.ConcurrencyObject
+	runJobsInfo        map[string]sdk.V2WorkflowRunJobInfo
+	runInfos           []sdk.V2WorkflowRunInfo
+	errorMsgs          []sdk.V2WorkflowRunInfo // when set, the run fails with these messages
+	runUpdated         bool                    // the run definition changed and must be saved
+	reEnqueue          bool                    // another pass is needed right away
+}
+
+func prepareRunJobs(ctx context.Context, db *gorp.DbMap, store cache.Store, proj *sdk.Project, wref *WorkflowRunEntityFinder, run *sdk.V2WorkflowRun, existingRunJobs []sdk.V2WorkflowRunJob, runVarsetCtx map[string]interface{}, wrEnqueue sdk.V2WorkflowRunEnqueue, jobsToQueue map[string]JobToTrigger, runJobsContexts sdk.JobsResultContext, concurrenciesDef map[string]sdk.V2RunConcurrency, defaultRegion string, parallelism matrixParallelism) (*prepareRunJobsResult, error) {
+	runJobs := make([]sdk.V2WorkflowRunJob, 0)
+	runJobsInfo := make(map[string]sdk.V2WorkflowRunJobInfo)
+	runInfos := make([]sdk.V2WorkflowRunInfo, 0)
+	hasToUpdateRun := false
+	reEnqueue := false
+
+	regionPermCache := make(map[string]*sdk.V2WorkflowRunJobInfo)
+
+	concurrencyUnlockedCount := make(map[string]int64)
+	runObjectsToCancelled := make(map[string]workflow_v2.ConcurrencyObject)
+
+	projectVariableSets, err := project.LoadVariableSetsByProject(ctx, db, proj.Key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Browse job to queue and compute data ( matrix / region / model etc..... )
+	for jobID, jobToTrigger := range jobsToQueue {
+		jobDef := jobToTrigger.Job
+
+		// Build env context: workflow-level env merged with job-level env (job takes priority)
+		envCtx := make(map[string]string)
+		for k, v := range run.Contexts.Env {
+			envCtx[k] = v
+		}
+		for k, v := range jobDef.Env {
+			envCtx[k] = v
+		}
+
+		runJobContext := sdk.WorkflowRunJobsContext{
+			WorkflowRunContext: sdk.WorkflowRunContext{
+				CDS: run.Contexts.CDS,
+				Git: run.Contexts.Git,
+				Env: envCtx,
+			},
+			Jobs:         runJobsContexts,
+			Vars:         make(map[string]interface{}),
+			Needs:        sdk.NeedsContext{},
+			Integrations: buildJobIntegrationsContext(proj.Integrations, jobDef.Integrations, run.WorkflowData.Workflow.Integrations),
+		}
+
+		// Add vars context
+		vss := make([]sdk.ProjectVariableSet, 0)
+		for _, vs := range jobDef.VariableSets {
+			if _, has := runVarsetCtx[vs]; !has {
+				vsDB, err := project.LoadVariableSetByName(ctx, db, run.ProjectKey, vs)
+				if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+					return nil, err
+				}
+				// If not found stop the run
+				if err != nil {
+					log.ErrorWithStackTrace(ctx, err)
+					msg := sdk.V2WorkflowRunInfo{
+						WorkflowRunID: run.ID,
+						IssuedAt:      time.Now(),
+						Level:         sdk.WorkflowRunInfoLevelError,
+						Message:       fmt.Sprintf("variable set %s not found on project", vs),
+					}
+					return &prepareRunJobsResult{errorMsgs: []sdk.V2WorkflowRunInfo{msg}}, nil
+				}
+				vsDB.Items, err = project.LoadVariableSetAllItem(ctx, db, vsDB.ID)
+				if err != nil {
+					return nil, err
+				}
+				vss = append(vss, *vsDB)
+			}
+		}
+		jobVarsCtx, _, err := buildVarsContext(ctx, vss)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range runVarsetCtx {
+			jobVarsCtx[k] = v
+		}
+		runJobContext.Vars = jobVarsCtx
+
+		// Add need context
+		for _, n := range jobDef.Needs {
+			if jobCtxData, has := runJobsContexts[n]; has {
+				runJobContext.Needs[n] = sdk.NeedContext{
+					Result:  jobCtxData.Result,
+					Outputs: jobCtxData.Outputs,
+				}
+			}
+		}
+
+		// Compute job matrix strategy
+		matrixPermutation, msInfo := generateMatrixPermutation(ctx, runJobContext, run, jobDef, jobToTrigger.Status)
+		if msInfo != nil {
+			return &prepareRunJobsResult{errorMsgs: []sdk.V2WorkflowRunInfo{*msInfo}}, nil
+		}
+
+		// No matrixed jobs or templated job skipped
+		if len(matrixPermutation) == 0 || (jobDef.NeedsTemplateResolution() && jobToTrigger.Status.IsTerminated()) {
+			runJob := sdk.V2WorkflowRunJob{
+				ID:                 sdk.UUID(),
+				WorkflowRunID:      run.ID,
+				Status:             jobToTrigger.Status,
+				JobID:              jobID,
+				Job:                jobDef,
+				DeprecatedUserID:   wrEnqueue.Initiator.UserID,
+				DeprecatedUsername: wrEnqueue.Initiator.Username(),
+				DeprecatedAdminMFA: wrEnqueue.Initiator.IsAdminWithMFA,
+				ProjectKey:         run.ProjectKey,
+				VCSServer:          run.VCSServer,
+				Repository:         run.Repository,
+				Region:             jobDef.Region,
+				WorkflowName:       run.WorkflowName,
+				RunNumber:          run.RunNumber,
+				RunAttempt:         run.RunAttempt,
+				Initiator:          wrEnqueue.Initiator,
+			}
+			if !jobDef.NeedsTemplateResolution() && len(jobDef.Steps) == 0 && !jobToTrigger.Status.IsTerminated() {
+				runJob.Status = sdk.V2WorkflowRunJobStatusSuccess
+			}
+			// A matrix without any permutation leaves nothing to run; a job already skipped keeps its own reason
+			if jobDef.Strategy != nil && len(jobDef.Strategy.Matrix) > 0 && !jobToTrigger.Status.IsTerminated() {
+				runJob.Status = sdk.V2WorkflowRunJobStatusSkipped
+				runJobsInfo[runJob.ID] = sdk.V2WorkflowRunJobInfo{
+					WorkflowRunID:    runJob.WorkflowRunID,
+					WorkflowRunJobID: runJob.ID,
+					IssuedAt:         time.Now(),
+					Level:            sdk.WorkflowRunInfoLevelWarning,
+					Message:          "found an empty matrix, skipping the job",
+				}
+			}
+			// If job has to be run
+			if !runJob.Status.IsTerminated() {
+				// If from template, retrieve template and apply it
+				if jobDef.NeedsTemplateResolution() {
+					hasToUpdateRun = true
+					// For templated job, we only create new jobs on the parent worklow
+					// With hasToUpdateRun the workflow run will be saved to update his definition
+					// With previous computed flag `hasTemplatedJob` the workflow will be retriggered in the workflow engine
+					msgs, err := computeJobFromTemplate(ctx, db, store, wref, runJobContext, jobID, jobDef, run, projectVariableSets, defaultRegion)
+					if err != nil {
+						return nil, err
+					}
+					if len(msgs) > 0 {
+						return &prepareRunJobsResult{errorMsgs: msgs}, nil
+					}
+				} else {
+					// If no template, interpolate job data
+					if jobDef.RunsOn.Model != "" {
+						runJob.ModelType = run.WorkflowData.WorkerModels[jobDef.RunsOn.Model].Type
+						runJob.ModelOSArch = run.WorkflowData.WorkerModels[jobDef.RunsOn.Model].OSArch
+					}
+					// Only interpolate job data if job is not skipped to avoid missing variables exported by parent jobs
+					for _, jobEvent := range run.RunJobEvent {
+						if jobEvent.RunAttempt != run.RunAttempt {
+							continue
+						}
+						if jobEvent.JobID != runJob.JobID {
+							continue
+						}
+						runJob.GateInputs = jobEvent.Inputs
+					}
+					// If no gate input provided but there is a gate on the job, fill with the default values
+					if runJob.GateInputs == nil && runJob.Job.Gate != "" {
+						runJob.GateInputs = sdk.GateInputs{}
+						for k, v := range run.WorkflowData.Workflow.Gates[runJob.Job.Gate].Inputs {
+							if v.Default == nil {
+								continue
+							}
+							runJob.GateInputs[k] = v.Default
+						}
+						runJob.GateInputs["manual"] = false
+					}
+					runJobContext.Gate = runJob.GateInputs
+
+					runJobInfo, runUpdated := computeRunJobsInterpolation(ctx, db, store, wref, run, &runJob, defaultRegion, regionPermCache, runJobContext, wrEnqueue)
+					if runJobInfo != nil {
+						runJobsInfo[runJob.ID] = *runJobInfo
+					}
+
+					if runUpdated {
+						hasToUpdateRun = runUpdated
+					}
+
+					// Manage concurrency if the job is not skipped
+					runJobInfo, err := manageJobConcurrency(ctx, db, *run, jobID, &runJob, concurrenciesDef, concurrencyUnlockedCount, runObjectsToCancelled)
+					if err != nil {
+						return nil, err
+					}
+					if runJobInfo != nil {
+						runJobsInfo[runJob.ID] = *runJobInfo
+					}
+					runJobs = append(runJobs, runJob)
+				}
+			} else {
+				runJobs = append(runJobs, runJob)
+			}
+
+		} else {
+			// /////////////
+			// Matrixed jobs
+			// /////////////
+
+			allVariableSets, err := project.LoadVariableSetsByProject(ctx, db, proj.Key)
+			if err != nil {
+				return nil, err
+			}
+
+			jobData := prepareJobData{
+				wrEnqueue:       wrEnqueue,
+				runJobContext:   runJobContext,
+				existingRunJobs: existingRunJobs,
+				jobID:           jobID,
+				jobToTrigger: JobToTrigger{
+					Status: jobToTrigger.Status,
+					Job:    jobDef,
+				},
+				defaultRegion:   defaultRegion,
+				regionPermCache: regionPermCache,
+				allVariableSets: allVariableSets,
+			}
+
+			if info := limitMatrixParallelism(run, jobID, jobDef, len(matrixPermutation), parallelism); info != nil {
+				runInfos = append(runInfos, *info)
+				hasToUpdateRun = true
+				reEnqueue = true
+				continue
+			}
+
+			if !jobDef.NeedsTemplateResolution() {
+				if info := capMatrixParallelism(run, jobID, concurrenciesDef, len(matrixPermutation), existingRunJobs, parallelism.Max); info != nil {
+					runInfos = append(runInfos, *info)
+				}
+				jobs, runUpdated, err := createMatrixedRunJobs(ctx, db, store, wref, matrixPermutation, runJobsInfo, run, jobData, concurrenciesDef, concurrencyUnlockedCount, runObjectsToCancelled)
+				if err != nil {
+					return nil, err
+				}
+				runJobs = append(runJobs, jobs...)
+				if runUpdated {
+					hasToUpdateRun = true
+				}
+			} else {
+				// For templated matrixed job, we only create new jobs on the parent worklow
+				// With hasToUpdateRun the workflow run will be saved to update his definition
+				// With previous computed flag `hasTemplatedJob` the workflow will be retriggered in the workflow engine
+				msgInfo := createTemplatedMatrixedJobs(ctx, db, store, wref, matrixPermutation, run, jobData)
+				hasToUpdateRun = true
+				if len(msgInfo) > 0 {
+					return &prepareRunJobsResult{errorMsgs: msgInfo}, nil
+				}
+			}
+		}
+	}
+
+	// Jobs of this run blocked by a concurrency: release the ones that got a slot, cancel the superseded ones.
+	// Nothing is written meanwhile, so the objects to release are computed once per concurrency.
+	unlockedByConcurrency := make(map[string][]workflow_v2.ConcurrencyObject)
+	for _, rj := range existingRunJobs {
+		if rj.Concurrency == nil || rj.Status != sdk.StatusBlocked {
+			continue
+		}
+		concurrencyKey := getConcurrencyUniqueKey(*rj.Concurrency, rj.ProjectKey, rj.VCSServer, rj.Repository, rj.WorkflowName)
+		objsToUnlocked, has := unlockedByConcurrency[concurrencyKey]
+		if !has {
+			var objsToCancelled []workflow_v2.ConcurrencyObject
+			var err error
+			objsToUnlocked, objsToCancelled, err = retrieveRunObjectsToUnLocked(ctx, db, rj.ProjectKey, rj.VCSServer, rj.Repository, rj.WorkflowName, *rj.Concurrency)
+			if err != nil {
+				return nil, err
+			}
+			unlockedByConcurrency[concurrencyKey] = objsToUnlocked
+			for _, runObject := range objsToCancelled {
+				runObjectsToCancelled[runObject.ID] = runObject
+			}
+		}
+		for _, rjUnlocked := range objsToUnlocked {
+			if rj.ID == rjUnlocked.ID {
+				runJobsInfo[rj.ID] = sdk.V2WorkflowRunJobInfo{
+					WorkflowRunID:    rj.WorkflowRunID,
+					WorkflowRunJobID: rj.ID,
+					IssuedAt:         time.Now(),
+					Level:            sdk.WorkflowRunInfoLevelInfo,
+					Message:          "Job has been unlocked",
+				}
+				rj.Queued = time.Now()
+				rj.Status = sdk.V2WorkflowRunJobStatusWaiting
+				runJobs = append(runJobs, rj)
+			}
+		}
+	}
+
+	return &prepareRunJobsResult{
+		runJobs:            runJobs,
+		runObjectsToCancel: runObjectsToCancelled,
+		runJobsInfo:        runJobsInfo,
+		runInfos:           runInfos,
+		runUpdated:         hasToUpdateRun,
+		reEnqueue:          reEnqueue,
+	}, nil
+}
+
+func computeJobFromTemplate(ctx context.Context, db *gorp.DbMap, store cache.Store, wref *WorkflowRunEntityFinder, runJobContext sdk.WorkflowRunJobsContext, jobID string, j sdk.V2Job, run *sdk.V2WorkflowRun, allVariableSets []sdk.ProjectVariableSet, defaultRegion string) ([]sdk.V2WorkflowRunInfo, error) {
+	ctx, end := telemetry.Span(ctx, "computeJobFromTemplate")
+	defer end()
+
+	bts, _ := json.Marshal(runJobContext)
+	var mapContexts map[string]interface{}
+	if err := json.Unmarshal(bts, &mapContexts); err != nil {
+		log.ErrorWithStackTrace(ctx, err)
+		return []sdk.V2WorkflowRunInfo{{
+			WorkflowRunID: run.ID,
+			Level:         sdk.WorkflowRunInfoLevelError,
+			IssuedAt:      time.Now(),
+			Message:       fmt.Sprintf("Job %s: unable to build context to compute job template: %v", jobID, err),
+		}}, nil
+	}
+	ap := sdk.NewActionParser(mapContexts, sdk.DefaultFuncs)
+
+	// Interpolate template parameters in case of matrix variable usage
+	interpolatedParams := make(map[string]string)
+	for k, p := range j.Parameters {
+		value, err := ap.InterpolateToString(ctx, p)
+		if err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+			return []sdk.V2WorkflowRunInfo{{
+				WorkflowRunID: run.ID,
+				Level:         sdk.WorkflowRunInfoLevelError,
+				IssuedAt:      time.Now(),
+				Message:       fmt.Sprintf("Job %s: unable to interpolate into a string job parameter %s: %v", jobID, p, err),
+			}}, nil
+		}
+		interpolatedParams[k] = value
+	}
+
+	// Retrieve Template and Lint
+	entityTemplate, tmpWorkflow, msgs, err := checkJobTemplate(ctx, db, store, wref, j, run, interpolatedParams)
+	if err != nil {
+		return nil, err
+	}
+	if len(msgs) > 0 {
+		return msgs, nil
+	}
+
+	// If there is no matrix, compute the final workflow now. Else it will be done at runtime
+
+	msgs, err = handleTemplatedJobInWorkflow(ctx, db, store, wref, entityTemplate, run, tmpWorkflow.Jobs, tmpWorkflow.Stages, tmpWorkflow.Gates, tmpWorkflow.Annotations, tmpWorkflow.Concurrencies, jobID, j, allVariableSets, defaultRegion)
+	if err != nil {
+		return nil, err
+	}
+	if len(msgs) > 0 {
+		return msgs, nil
+	}
+
+	// Remove templated job
+	delete(run.WorkflowData.Workflow.Jobs, jobID)
+
+	// Check usage of current job stage
+	if j.Stage != "" {
+		stageUsed := false
+		for _, workflowJob := range run.WorkflowData.Workflow.Jobs {
+			if workflowJob.Stage == j.Stage {
+				stageUsed = true
+			}
+		}
+		if !stageUsed {
+			for _, stage := range run.WorkflowData.Workflow.Stages {
+				if slices.Contains(stage.Needs, j.Stage) {
+					stageUsed = true
+				}
+			}
+		}
+		if !stageUsed {
+			delete(run.WorkflowData.Workflow.Stages, j.Stage)
+		}
+	}
+
+	msgsLint := make([]sdk.V2WorkflowRunInfo, 0)
+	errs := run.WorkflowData.Workflow.LintWorkflowRunData()
+	for _, e := range errs {
+		msgsLint = append(msgsLint, sdk.V2WorkflowRunInfo{
+			WorkflowRunID: run.ID,
+			Level:         sdk.WorkflowRunInfoLevelError,
+			IssuedAt:      time.Now(),
+			Message:       e.Error(),
+		})
+	}
+
+	return msgsLint, nil
+}
+
+func handleTemplatedJobInWorkflow(ctx context.Context, db *gorp.DbMap, store cache.Store, wref *WorkflowRunEntityFinder, templateEntity *sdk.EntityWithObject, run *sdk.V2WorkflowRun, newJobs map[string]sdk.V2Job, newStages map[string]sdk.WorkflowStage, newGates map[string]sdk.V2JobGate, newAnnotations map[string]string, newConcurrencies []sdk.WorkflowConcurrency, jobID string, j sdk.V2Job, allVariableSets []sdk.ProjectVariableSet, defaultRegion string) ([]sdk.V2WorkflowRunInfo, error) {
+	// Retrieve the current template chain for the given job
+	parentChain := run.WorkflowData.JobTemplateChains[jobID]
+	if slices.Contains(parentChain, templateEntity.CompleteName) {
+		return []sdk.V2WorkflowRunInfo{{
+			WorkflowRunID: run.ID,
+			IssuedAt:      time.Now(),
+			Level:         sdk.WorkflowRunInfoLevelError,
+			Message:       fmt.Sprintf("job %s: template cycle detected: %s", jobID, strings.Join(append(slices.Clone(parentChain), templateEntity.CompleteName), " -> ")),
+		}}, nil
+	}
+
+	// Check duplication of jobID
+	// Retrieve root job
+	rootJobs := make([]string, 0)
+	for subJobID, subJob := range newJobs {
+		if _, exist := run.WorkflowData.Workflow.Jobs[subJobID]; exist {
+			msgs := []sdk.V2WorkflowRunInfo{{
+				WorkflowRunID: run.ID,
+				IssuedAt:      time.Now(),
+				Level:         sdk.WorkflowRunInfoLevelError,
+				Message:       fmt.Sprintf("job %s: job %s defined in template %s already exist in the parent workflow", jobID, subJobID, j.From),
+			}}
+			return msgs, nil
+		}
+		if len(subJob.Needs) == 0 {
+			rootJobs = append(rootJobs, subJobID)
+		}
+	}
+
+	// Retrieve final jobs
+	finalJobs := make([]string, 0)
+loop:
+	for subJobID := range newJobs {
+		for _, jobDef := range newJobs {
+			if slices.Contains(jobDef.Needs, subJobID) {
+				continue loop
+			}
+		}
+		finalJobs = append(finalJobs, subJobID)
+	}
+
+	// Set needs on templated root job
+	if len(j.Needs) > 0 {
+		for _, id := range rootJobs {
+			jobDef := newJobs[id]
+
+			// If new root templated job has a different stage from the old one
+			if jobDef.Stage == j.Stage {
+				jobDef.Needs = append(jobDef.Needs, j.Needs...)
+				newJobs[id] = jobDef
+			}
+		}
+	}
+
+	// Update needs in parent workflow with job ID from template
+	for id := range run.WorkflowData.Workflow.Jobs {
+		jobDef := run.WorkflowData.Workflow.Jobs[id]
+		for i := range jobDef.Needs {
+			if jobDef.Needs[i] == jobID {
+				jobDef.Needs = slices.Delete(jobDef.Needs, i, i+1)
+				jobDef.Needs = append(jobDef.Needs, finalJobs...)
+				break
+			}
+		}
+		run.WorkflowData.Workflow.Jobs[id] = jobDef
+	}
+
+	if run.WorkflowData.Workflow.Stages == nil {
+		run.WorkflowData.Workflow.Stages = make(map[string]sdk.WorkflowStage)
+	}
+	for k, v := range newStages {
+		if _, has := run.WorkflowData.Workflow.Stages[k]; !has {
+			run.WorkflowData.Workflow.Stages[k] = v
+		}
+	}
+
+	repoTemplate, err := repository.LoadRepositoryByID(ctx, db, templateEntity.ProjectRepositoryID)
+	if err != nil {
+		return nil, err
+	}
+	vcsTemplate, err := vcs.LoadVCSByIDAndProjectKey(ctx, db, templateEntity.ProjectKey, repoTemplate.VCSProjectID)
+	if err != nil {
+		return nil, err
+	}
+	// The finder's location must be the template's (project must match its vcs), so the
+	// template's entity references resolve against the template, not the run's project.
+	tmplProject := wref.project
+	if templateEntity.ProjectKey != wref.project.Key {
+		p, err := project.Load(ctx, db, templateEntity.ProjectKey)
+		if err != nil {
+			return nil, sdk.WrapError(err, "unable to find project %s", templateEntity.ProjectKey)
+		}
+		tmplProject = *p
+	}
+	wrefTemplate, err := NewWorkflowRunEntityFinder(ctx, db, tmplProject, *run, *repoTemplate, *vcsTemplate, templateEntity.Ref, templateEntity.Commit, wref.ef.libraryProject, &wref.ef.initiator)
+	if err != nil {
+		return nil, err
+	}
+	// Project-scoped resources (integrations, variable sets, concurrencies) belong to the
+	// run's project, not the template's.
+	wrefTemplate.project = wref.project
+	integrations, msgs, err := wrefTemplate.checkIntegrations(ctx, db, newJobs)
+	if err != nil {
+		return nil, err
+	}
+	if len(msgs) > 0 {
+		return msgs, nil
+	}
+
+	// New jobs inherit from parent template chain + add the current template
+	templateChain := append(slices.Clone(parentChain), templateEntity.CompleteName)
+	delete(run.WorkflowData.JobTemplateChains, jobID) // remove the job that will be replaced
+
+	if run.WorkflowData.JobTemplateChains == nil {
+		run.WorkflowData.JobTemplateChains = make(map[string][]string)
+	}
+
+	// Set job on workflow
+	for k, v := range newJobs {
+		if v.NeedsTemplateResolution() {
+			// Rewrite the nested reference with the template's complete name, resolved
+			// against the declaring template's location: the relative reference only
+			// makes sense there, and the location is lost once the job is injected.
+			eNested, msg, err := wrefTemplate.checkWorkflowTemplate(ctx, db, store, v.From)
+			if err != nil {
+				return nil, err
+			}
+			if msg != nil {
+				return []sdk.V2WorkflowRunInfo{*msg}, nil
+			}
+			v.From = eNested.CompleteName
+		} else if v.From == "" && (len(v.Steps) > 0 || v.RunsOn.Model != "") {
+			// Jobs resolved from the template keep the template's complete name as
+			// provenance. Empty jobs are skipped: `from` without content would read
+			// as an unresolved reference.
+			v.From = templateEntity.CompleteName
+		}
+		run.WorkflowData.Workflow.Jobs[k] = v
+		run.WorkflowData.JobTemplateChains[k] = templateChain
+		msg := retrieveAndUpdateAllJobDependencies(ctx, db, store, run, k, v, wrefTemplate, integrations, allVariableSets, defaultRegion)
+		if msg != nil {
+			return []sdk.V2WorkflowRunInfo{*msg}, nil
+		}
+	}
+	// Set gate on workflow
+	if run.WorkflowData.Workflow.Gates == nil {
+		run.WorkflowData.Workflow.Gates = make(map[string]sdk.V2JobGate)
+	}
+	for k, v := range newGates {
+		if _, has := run.WorkflowData.Workflow.Gates[k]; !has {
+			run.WorkflowData.Workflow.Gates[k] = v
+		}
+	}
+	// Set annotations on workflow
+	if run.WorkflowData.Workflow.Annotations == nil {
+		run.WorkflowData.Workflow.Annotations = make(map[string]string)
+	}
+	for k, v := range newAnnotations {
+		if _, has := run.WorkflowData.Workflow.Annotations[k]; !has {
+			run.WorkflowData.Workflow.Annotations[k] = v
+		}
+	}
+	// Set new concurrencies on workflow, normalized like the ones defined by the workflow itself
+	bts, _ := json.Marshal(run.Contexts)
+	var mapContexts map[string]interface{}
+	if err := json.Unmarshal(bts, &mapContexts); err != nil {
+		return nil, sdk.WithStack(err)
+	}
+	if err := normalizeConcurrencies(ctx, sdk.NewActionParser(mapContexts, sdk.DefaultFuncs), newConcurrencies); err != nil {
+		return []sdk.V2WorkflowRunInfo{{
+			WorkflowRunID: run.ID,
+			IssuedAt:      time.Now(),
+			Level:         sdk.WorkflowRunInfoLevelError,
+			Message:       fmt.Sprintf("job %s: %v", jobID, err),
+		}}, nil
+	}
+	for _, c := range newConcurrencies {
+		found := false
+		for _, existingC := range run.WorkflowData.Workflow.Concurrencies {
+			if c.Name == existingC.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			run.WorkflowData.Workflow.Concurrencies = append(run.WorkflowData.Workflow.Concurrencies, c)
+		}
+	}
+
+	if run.WorkflowData.Actions == nil {
+		run.WorkflowData.Actions = make(map[string]sdk.V2Action)
+	}
+
+	for k, v := range wrefTemplate.ef.actionsCache {
+		if _, has := run.WorkflowData.Actions[k]; !has {
+			run.WorkflowData.Actions[k] = v.Action
+		}
+		wref.ef.actionsCache[k] = v
+	}
+	for _, v := range wrefTemplate.ef.localActionsCache {
+		if _, has := run.WorkflowData.Actions[v.CompleteName]; !has {
+			run.WorkflowData.Actions[v.CompleteName] = v.Action
+		}
+		wref.ef.actionsCache[v.CompleteName] = v
+	}
+
+	if run.WorkflowData.WorkerModels == nil {
+		run.WorkflowData.WorkerModels = make(map[string]sdk.V2WorkerModel)
+	}
+
+	for k, v := range wrefTemplate.ef.workerModelCache {
+		if _, has := run.WorkflowData.WorkerModels[k]; !has {
+			run.WorkflowData.WorkerModels[k] = v.Model
+		}
+		wref.ef.workerModelCache[k] = v
+	}
+	for _, v := range wrefTemplate.ef.localWorkerModelCache {
+		if _, has := run.WorkflowData.WorkerModels[v.CompleteName]; !has {
+			run.WorkflowData.WorkerModels[v.CompleteName] = v.Model
+		}
+		wref.ef.workerModelCache[v.CompleteName] = v
+	}
+	return nil, nil
+}
+
+func createTemplatedMatrixedJobs(ctx context.Context, db *gorp.DbMap, store cache.Store, wref *WorkflowRunEntityFinder, matrixPermutation []map[string]string, run *sdk.V2WorkflowRun, data prepareJobData) []sdk.V2WorkflowRunInfo {
+	newJobs := make(map[string]sdk.V2Job)
+	newStages := make(map[string]sdk.WorkflowStage)
+	newGates := make(map[string]sdk.V2JobGate)
+	newAnnotations := make(map[string]string)
+	newConcurrencies := make(map[string]sdk.WorkflowConcurrency)
+	var entityTemplateWithObj *sdk.EntityWithObject
+	for _, m := range matrixPermutation {
+		data.runJobContext.Matrix = make(map[string]string)
+		for k, v := range m {
+			data.runJobContext.Matrix[k] = v
+		}
+		bts, _ := json.Marshal(data.runJobContext)
+		var mapContexts map[string]interface{}
+		if err := json.Unmarshal(bts, &mapContexts); err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+			return []sdk.V2WorkflowRunInfo{{
+				WorkflowRunID: run.ID,
+				Level:         sdk.WorkflowRunInfoLevelError,
+				IssuedAt:      time.Now(),
+				Message:       fmt.Sprintf("Job %s: unable to build context to compute job with permutation %v: %v", data.jobID, m, err),
+			}}
+		}
+
+		ap := sdk.NewActionParser(mapContexts, sdk.DefaultFuncs)
+
+		// Interpolate template parameters in case of matrix variable usage
+		interpolatedParams := make(map[string]string)
+		for k, p := range data.jobToTrigger.Job.Parameters {
+			value, err := ap.InterpolateToString(ctx, p)
+			if err != nil {
+				log.ErrorWithStackTrace(ctx, err)
+				return []sdk.V2WorkflowRunInfo{{
+					WorkflowRunID: run.ID,
+					Level:         sdk.WorkflowRunInfoLevelError,
+					IssuedAt:      time.Now(),
+					Message:       fmt.Sprintf("Job %s: unable to interpolate into a string job parameter %s: %v", data.jobID, p, err),
+				}}
+			}
+			interpolatedParams[k] = value
+		}
+
+		entityTemplate, tmpWorkflow, msgs, err := checkJobTemplate(ctx, db, store, wref, data.jobToTrigger.Job, run, interpolatedParams)
+		if err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+			return []sdk.V2WorkflowRunInfo{{
+				WorkflowRunID: run.ID,
+				Level:         sdk.WorkflowRunInfoLevelError,
+				IssuedAt:      time.Now(),
+				Message:       fmt.Sprintf("Job %s: unable to build job from template: %v", data.jobID, err),
+			}}
+		}
+		if len(msgs) > 0 {
+			return msgs
+		}
+		entityTemplateWithObj = entityTemplate
+
+		for k, v := range tmpWorkflow.Jobs {
+			if _, has := newJobs[k]; has {
+				return []sdk.V2WorkflowRunInfo{{
+					WorkflowRunID: run.ID,
+					Level:         sdk.WorkflowRunInfoLevelError,
+					IssuedAt:      time.Now(),
+					Message:       fmt.Sprintf("Job %q: there is more than one job with the name %q", data.jobID, k),
+				}}
+			}
+			newJobs[k] = v
+		}
+		for k, v := range tmpWorkflow.Stages {
+			if _, has := newStages[k]; !has {
+				newStages[k] = v
+			}
+		}
+		for k, v := range tmpWorkflow.Gates {
+			if _, has := newGates[k]; !has {
+				newGates[k] = v
+			}
+		}
+		for k, v := range tmpWorkflow.Annotations {
+			if _, has := newAnnotations[k]; !has {
+				newAnnotations[k] = v
+			}
+		}
+
+		for _, c := range tmpWorkflow.Concurrencies {
+			if _, has := newConcurrencies[c.Name]; !has {
+				newConcurrencies[c.Name] = c
+			}
+		}
+
+	}
+
+	concurrencies := make([]sdk.WorkflowConcurrency, 0, len(newConcurrencies))
+	for _, c := range newConcurrencies {
+		concurrencies = append(concurrencies, c)
+	}
+
+	// Handle templated job in workflow
+	msgs, err := handleTemplatedJobInWorkflow(ctx, db, store, wref, entityTemplateWithObj, run, newJobs, newStages, newGates, newAnnotations, concurrencies, data.jobID, data.jobToTrigger.Job, data.allVariableSets, data.defaultRegion)
+	if err != nil {
+		log.ErrorWithStackTrace(ctx, err)
+		return []sdk.V2WorkflowRunInfo{{
+			WorkflowRunID: run.ID,
+			Level:         sdk.WorkflowRunInfoLevelError,
+			IssuedAt:      time.Now(),
+			Message:       err.Error(),
+		}}
+	}
+	if len(msgs) > 0 {
+		return msgs
+	}
+
+	// Remove templated job
+	delete(run.WorkflowData.Workflow.Jobs, data.jobID)
+
+	// Check usage of current job stage
+	if data.jobToTrigger.Job.Stage != "" {
+		stageUsed := false
+		for _, j := range run.WorkflowData.Workflow.Jobs {
+			if j.Stage == data.jobToTrigger.Job.Stage {
+				stageUsed = true
+			}
+		}
+		if !stageUsed {
+			for _, stage := range run.WorkflowData.Workflow.Stages {
+				if slices.Contains(stage.Needs, data.jobToTrigger.Job.Stage) {
+					stageUsed = true
+				}
+			}
+		}
+		if !stageUsed {
+			delete(run.WorkflowData.Workflow.Stages, data.jobToTrigger.Job.Stage)
+		}
+	}
+
+	msgsLint := make([]sdk.V2WorkflowRunInfo, 0)
+	errs := run.WorkflowData.Workflow.LintWorkflowRunData()
+	for _, e := range errs {
+		msgsLint = append(msgsLint, sdk.V2WorkflowRunInfo{
+			WorkflowRunID: run.ID,
+			Level:         sdk.WorkflowRunInfoLevelError,
+			IssuedAt:      time.Now(),
+			Message:       e.Error(),
+		})
+	}
+
+	return msgsLint
+}
+
+func createMatrixedRunJobs(ctx context.Context, db *gorp.DbMap, store cache.Store, wref *WorkflowRunEntityFinder, matrixPermutation []map[string]string, runJobsInfo map[string]sdk.V2WorkflowRunJobInfo, run *sdk.V2WorkflowRun, data prepareJobData, concurrenciesDef map[string]sdk.V2RunConcurrency, concurrencyUnlockedCount map[string]int64, runObjToCancelled map[string]workflow_v2.ConcurrencyObject) ([]sdk.V2WorkflowRunJob, bool, error) {
+	runJobs := make([]sdk.V2WorkflowRunJob, 0)
+	hasToUpdateRun := false
+
+	// Check permutation to trigger
+	permutations := searchPermutationToTrigger(ctx, matrixPermutation, data.existingRunJobs, data.jobID)
+	for _, m := range permutations {
+		permJobDef := data.jobToTrigger.Job.Copy()
+		runJob := sdk.V2WorkflowRunJob{
+			ID:                 sdk.UUID(),
+			WorkflowRunID:      run.ID,
+			Status:             data.jobToTrigger.Status,
+			JobID:              data.jobID,
+			Job:                permJobDef,
+			DeprecatedUserID:   data.wrEnqueue.Initiator.UserID,
+			DeprecatedUsername: data.wrEnqueue.Initiator.Username(),
+			DeprecatedAdminMFA: data.wrEnqueue.Initiator.IsAdminWithMFA,
+			ProjectKey:         run.ProjectKey,
+			VCSServer:          run.VCSServer,
+			Repository:         run.Repository,
+			Region:             permJobDef.Region,
+			WorkflowName:       run.WorkflowName,
+			RunNumber:          run.RunNumber,
+			RunAttempt:         run.RunAttempt,
+			Matrix:             sdk.JobMatrix{},
+			Initiator:          data.wrEnqueue.Initiator,
+		}
+		if len(data.jobToTrigger.Job.Steps) == 0 && !data.jobToTrigger.Status.IsTerminated() {
+			runJob.Status = sdk.V2WorkflowRunJobStatusSuccess
+		}
+		for k, v := range m {
+			runJob.Matrix[k] = v
+		}
+		if permJobDef.RunsOn.Model != "" {
+			runJob.ModelType = run.WorkflowData.WorkerModels[permJobDef.RunsOn.Model].Type
+			runJob.ModelOSArch = run.WorkflowData.WorkerModels[permJobDef.RunsOn.Model].OSArch
+		}
+		if !data.jobToTrigger.Status.IsTerminated() {
+			for _, jobEvent := range run.RunJobEvent {
+				if jobEvent.RunAttempt != run.RunAttempt {
+					continue
+				}
+				if jobEvent.JobID != runJob.JobID {
+					continue
+				}
+				runJob.GateInputs = jobEvent.Inputs
+			}
+			// If no gate input provided but there is a gate on the job, fill with the default values
+			if runJob.GateInputs == nil && runJob.Job.Gate != "" {
+				runJob.GateInputs = sdk.GateInputs{}
+				for k, v := range run.WorkflowData.Workflow.Gates[runJob.Job.Gate].Inputs {
+					if v.Default == nil {
+						continue
+					}
+					runJob.GateInputs[k] = v.Default
+				}
+				runJob.GateInputs["manual"] = false
+			}
+			data.runJobContext.Gate = runJob.GateInputs
+			data.runJobContext.Matrix = runJob.Matrix
+			runJobInfo, runUpdated := computeRunJobsInterpolation(ctx, db, store, wref, run, &runJob, data.defaultRegion, data.regionPermCache, data.runJobContext, data.wrEnqueue)
+			if runJobInfo != nil {
+				runJobsInfo[runJob.ID] = *runJobInfo
+			}
+			if runUpdated {
+				hasToUpdateRun = runUpdated
+			}
+
+			runJobInfo, err := manageJobConcurrency(ctx, db, *run, data.jobID, &runJob, concurrenciesDef, concurrencyUnlockedCount, runObjToCancelled)
+			if err != nil {
+				return runJobs, hasToUpdateRun, err
+			}
+			if runJobInfo != nil {
+				runJobsInfo[runJob.ID] = *runJobInfo
+			}
+		}
+
+		runJobs = append(runJobs, runJob)
+	}
+	return runJobs, hasToUpdateRun, nil
+}
+
+func searchPermutationToTrigger(_ context.Context, permutations []map[string]string, runJobs []sdk.V2WorkflowRunJob, jobID string) []map[string]string {
+	runJobsForJobID := make([]sdk.V2WorkflowRunJob, 0)
+
+	for _, rj := range runJobs {
+		if rj.JobID == jobID {
+			runJobsForJobID = append(runJobsForJobID, rj)
+		}
+	}
+
+	if len(runJobsForJobID) == 0 {
+		return permutations
+	}
+
+	permutationToTrigger := make([]map[string]string, 0)
+	// Browse all permutation
+	for _, perm := range permutations {
+		runJobFound := false
+		// Search if it has been already trigger
+	runJobLoop:
+		for _, rj := range runJobsForJobID {
+			for k, v := range perm {
+				// If not the same permutation, check next run job
+				if rj.Matrix[k] != v {
+					continue runJobLoop
+				}
+			}
+			runJobFound = true
+			break
+		}
+		if !runJobFound {
+			permutationToTrigger = append(permutationToTrigger, perm)
+		}
+	}
+	return permutationToTrigger
+}
+
+func generateMatrixPermutation(ctx context.Context, rootJobContext sdk.WorkflowRunJobsContext, run *sdk.V2WorkflowRun, jobDef sdk.V2Job, status sdk.V2WorkflowRunJobStatus) ([]map[string]string, *sdk.V2WorkflowRunInfo) {
+	if status.IsTerminated() {
+		return make([]map[string]string, 0), nil
+	}
+	keys := make([]string, 0)
+	interpolatedMatrix := make(map[string][]string)
+	if jobDef.Strategy != nil && len(jobDef.Strategy.Matrix) > 0 {
+		bts, _ := json.Marshal(rootJobContext)
+		var mapContexts map[string]interface{}
+		_ = json.Unmarshal(bts, &mapContexts) // error cannot happen here
+
+		ap := sdk.NewActionParser(mapContexts, sdk.DefaultFuncs)
+
+		for k, v := range jobDef.Strategy.Matrix {
+			keys = append(keys, k)
+
+			matrixValues := make([]string, 0)
+			if slice, ok := v.([]interface{}); ok {
+				for _, sliceValue := range slice {
+					valueString, ok := sliceValue.(string)
+					if !ok {
+						msg := &sdk.V2WorkflowRunInfo{
+							WorkflowRunID: run.ID,
+							IssuedAt:      time.Now(),
+							Level:         sdk.WorkflowRunInfoLevelError,
+							Message:       fmt.Sprintf("matrix value %v is not a string", sliceValue),
+						}
+						return nil, msg
+					}
+
+					interpolatedValue, err := ap.InterpolateToString(ctx, valueString)
+					if err != nil {
+						log.ErrorWithStackTrace(ctx, err)
+						msg := &sdk.V2WorkflowRunInfo{
+							WorkflowRunID: run.ID,
+							IssuedAt:      time.Now(),
+							Level:         sdk.WorkflowRunInfoLevelError,
+							Message:       fmt.Sprintf("unable to interpolate matrix value %s: %v", valueString, err),
+						}
+						return nil, msg
+					}
+					matrixValues = append(matrixValues, interpolatedValue)
+				}
+			} else if valueString, ok := v.(string); ok {
+				interpolatedValue, err := ap.Interpolate(ctx, valueString)
+				if err != nil {
+					log.ErrorWithStackTrace(ctx, err)
+					msg := &sdk.V2WorkflowRunInfo{
+						WorkflowRunID: run.ID,
+						IssuedAt:      time.Now(),
+						Level:         sdk.WorkflowRunInfoLevelError,
+						Message:       fmt.Sprintf("unable to interpolate %s: %v", valueString, err),
+					}
+					return nil, msg
+				}
+				interpoaltedSlice, ok := interpolatedValue.([]interface{})
+				if !ok {
+					msg := &sdk.V2WorkflowRunInfo{
+						WorkflowRunID: run.ID,
+						IssuedAt:      time.Now(),
+						Level:         sdk.WorkflowRunInfoLevelError,
+						Message:       fmt.Sprintf("interpolated matrix is not a string slice, got %T", interpolatedValue),
+					}
+					return nil, msg
+				}
+				stringsValue := make([]string, 0, len(interpoaltedSlice))
+				for _, vle := range interpoaltedSlice {
+					stringsValue = append(stringsValue, fmt.Sprintf("%v", vle))
+				}
+				matrixValues = stringsValue
+			} else {
+				msg := &sdk.V2WorkflowRunInfo{
+					WorkflowRunID: run.ID,
+					IssuedAt:      time.Now(),
+					Level:         sdk.WorkflowRunInfoLevelError,
+					Message:       fmt.Sprintf("unable to use matrix key %s of type %T", k, v),
+				}
+				return nil, msg
+			}
+			interpolatedMatrix[k] = matrixValues
+
+		}
+	}
+
+	alls := make([]map[string]string, 0)
+	if jobDef.Strategy != nil && len(interpolatedMatrix) > 0 {
+		generateMatrix(interpolatedMatrix, keys, 0, make(map[string]string), &alls)
+		for k := range interpolatedMatrix {
+			jobDef.Strategy.Matrix[k] = interpolatedMatrix[k]
+		}
+	}
+
+	return alls, nil
+}
+
+func generateMatrix(matrix map[string][]string, keys []string, keyIndex int, current map[string]string, alls *[]map[string]string) {
+	if len(current) == len(keys) {
+		combinationCopy := make(map[string]string)
+		for k, v := range current {
+			combinationCopy[k] = v
+		}
+		*alls = append(*alls, combinationCopy)
+		return
+	}
+
+	key := keys[keyIndex]
+	values := matrix[key]
+	for _, value := range values {
+		current[key] = value
+		generateMatrix(matrix, keys, keyIndex+1, current, alls)
+		delete(current, key)
+	}
+}
+
+type JobToTrigger struct {
+	Status sdk.V2WorkflowRunJobStatus
+	Job    sdk.V2Job
+}
+
+// Return jobToQueue, skippedJob, runInfos, error
+func retrieveJobToQueue(ctx context.Context, db *gorp.DbMap, wrEnqueue sdk.V2WorkflowRunEnqueue, run *sdk.V2WorkflowRun, runJobs []sdk.V2WorkflowRunJob, allrunJobsMap map[string]sdk.V2WorkflowRunJob, runJobsContexts sdk.JobsResultContext, defaultRegion string) (map[string]JobToTrigger, []sdk.V2WorkflowRunInfo, error) {
+	ctx, next := telemetry.Span(ctx, "retrieveJobToQueue")
+	defer next()
+	runInfos := make([]sdk.V2WorkflowRunInfo, 0)
+	jobToQueue := make(map[string]JobToTrigger)
+
+	// Select jobs to check ( all workflow or list of jobs from enqueue request )
+	jobsToCheck := make(map[string]sdk.V2Job)
+
+	for jobID, jobDef := range run.WorkflowData.Workflow.Jobs {
+		// Do not enqueue jobs that have already a run
+		runJobMapItem, has := allrunJobsMap[jobID]
+
+		if !has {
+			jobsToCheck[jobID] = jobDef
+		} else {
+			// If job with matrix, check if we have to rerun a permmutation
+			if runJobMapItem.Job.Strategy != nil && len(runJobMapItem.Job.Strategy.Matrix) > 0 {
+
+				// If runjob has a status && a template, ignore it. A matrix job can be run if template has been resolved
+				if runJobMapItem.Job.NeedsTemplateResolution() {
+					continue
+				}
+
+				// If no permutation has been used, nothing to check ( job skipped or empty matrix )
+				if len(runJobMapItem.Matrix) == 0 {
+					continue
+				}
+
+				nbPermutations := 1
+				for _, v := range runJobMapItem.Job.Strategy.Matrix {
+					if vString, ok := v.([]string); ok {
+						nbPermutations *= len(vString)
+					} else if vInterface, ok := v.([]interface{}); ok {
+						nbPermutations *= len(vInterface)
+					}
+				}
+				runPermutations := 0
+				for _, rj := range runJobs {
+					if rj.JobID == runJobMapItem.JobID {
+						runPermutations++
+					}
+				}
+				// If there is still permutation to run
+				if nbPermutations > runPermutations {
+					jobsToCheck[jobID] = jobDef
+				}
+			}
+
+		}
+	}
+
+	// Check jobs : Needs / Condition / User Right
+	stages := run.GetStages()
+	if len(stages) > 0 {
+		for k, j := range runJobsContexts {
+			stageName := run.WorkflowData.Workflow.Jobs[k].Stage
+			jobInStage := stages[stageName].Jobs[k]
+			jobInStage.Status = j.Result
+			stages[stageName].Jobs[k] = jobInStage
+		}
+		stages.ComputeStatus()
+	}
+
+	for jobID, jobDef := range jobsToCheck {
+
+		// Skip the job in stage that cannot be run
+		if len(stages) > 0 && !stages[jobDef.Stage].CanBeRun {
+			continue
+		}
+
+		// Check jobs needs
+		if ok := checkJobNeeds(runJobsContexts, jobDef); !ok {
+			continue
+		}
+
+		// Build job context
+		jobContext := buildContextForJob(ctx, run.WorkflowData.Workflow, runJobsContexts, run.Contexts, stages, jobID)
+
+		canBeQueued, infos, err := checkJob(ctx, db, wrEnqueue, *run, jobID, &jobDef, jobContext)
+		runInfos = append(runInfos, infos...)
+		if err != nil {
+			jobToQueue[jobID] = JobToTrigger{
+				Status: sdk.V2WorkflowRunJobStatusSkipped,
+				Job:    jobDef,
+			}
+			return nil, runInfos, err
+		}
+		if !canBeQueued {
+			jobToQueue[jobID] = JobToTrigger{
+				Status: sdk.V2WorkflowRunJobStatusSkipped,
+				Job:    jobDef,
+			}
+			continue
+		}
+
+		jobToQueue[jobID] = JobToTrigger{
+			Status: sdk.V2WorkflowRunJobStatusWaiting,
+			Job:    jobDef,
+		}
+	}
+
+	return jobToQueue, runInfos, nil
+}
+
+func checkJob(ctx context.Context, db gorp.SqlExecutor, wrEnqueue sdk.V2WorkflowRunEnqueue, run sdk.V2WorkflowRun, jobID string, jobDef *sdk.V2Job, currentJobContext sdk.WorkflowRunJobsContext) (bool, []sdk.V2WorkflowRunInfo, error) {
+	ctx, next := telemetry.Span(ctx, "checkJob", trace.StringAttribute(telemetry.TagJob, jobID))
+	defer next()
+
+	runInfos := make([]sdk.V2WorkflowRunInfo, 0)
+
+	// check varset right
+	if !wrEnqueue.Initiator.IsAdminWithMFA && !wrEnqueue.DeprecatedIsAdminWithMFA {
+		varsets := append(run.WorkflowData.Workflow.VariableSets, jobDef.VariableSets...)
+
+		if wrEnqueue.Initiator.IsUser() {
+			has, vInError, err := rbac.HasRoleOnVariableSetsAndUserID(ctx, db, sdk.VariableSetRoleUse, wrEnqueue.Initiator.UserID, run.ProjectKey, varsets)
+			if err != nil {
+				log.ErrorWithStackTrace(ctx, err)
+				runInfos = append(runInfos, sdk.V2WorkflowRunInfo{
+					WorkflowRunID: run.ID,
+					Level:         sdk.WorkflowRunInfoLevelError,
+					Message:       fmt.Sprintf("job %s: unable to check right for user %s on varset %v: %v", jobID, wrEnqueue.Initiator.Username(), varsets, err),
+				})
+				return false, runInfos, nil
+			}
+			if !has {
+				runInfos = append(runInfos, sdk.V2WorkflowRunInfo{
+					WorkflowRunID: run.ID,
+					Level:         sdk.WorkflowRunInfoLevelWarning,
+					Message:       fmt.Sprintf("job %s: user %s does not have enough right on varset %s", jobID, wrEnqueue.Initiator.Username(), vInError),
+				})
+				return false, runInfos, nil
+			}
+		} else {
+			has, vInError, err := rbac.HasRoleOnVariableSetsAndVCSUser(ctx, db, sdk.VariableSetRoleUse, sdk.RBACVCSUser{VCSServer: wrEnqueue.Initiator.VCS, VCSUsername: wrEnqueue.Initiator.VCSUsername}, run.ProjectKey, varsets)
+			if err != nil {
+				log.ErrorWithStackTrace(ctx, err)
+				runInfos = append(runInfos, sdk.V2WorkflowRunInfo{
+					WorkflowRunID: run.ID,
+					Level:         sdk.WorkflowRunInfoLevelError,
+					Message:       fmt.Sprintf("job %s: unable to check right for user %s on varset %v: %v", jobID, wrEnqueue.Initiator.Username(), varsets, err),
+				})
+				return false, runInfos, nil
+			}
+			if !has {
+				runInfos = append(runInfos, sdk.V2WorkflowRunInfo{
+					WorkflowRunID: run.ID,
+					Level:         sdk.WorkflowRunInfoLevelWarning,
+					Message:       fmt.Sprintf("job %s: vcs user %s does not have enough right on varset %s", jobID, wrEnqueue.Initiator.Username(), vInError),
+				})
+				return false, runInfos, nil
+			}
+		}
+	}
+
+	// Retrieve inputs from an event if exists
+	var inputs map[string]interface{}
+	for _, je := range run.RunJobEvent {
+		if je.RunAttempt == run.RunAttempt && je.JobID == jobID {
+			inputs = je.Inputs
+			break
+		}
+	}
+
+	// check job condition
+	canRun, err := checkCanRunJob(ctx, db, run, inputs, *jobDef, currentJobContext, wrEnqueue.Initiator)
+	if err != nil {
+		log.ErrorWithStackTrace(ctx, err)
+		runInfos = append(runInfos, sdk.V2WorkflowRunInfo{
+			WorkflowRunID: run.ID,
+			Level:         sdk.WorkflowRunInfoLevelError,
+			Message:       fmt.Sprintf("%v", err),
+		})
+		return false, runInfos, err
+	}
+	if !canRun {
+		runInfos = append(runInfos, sdk.V2WorkflowRunInfo{
+			WorkflowRunID: run.ID,
+			Level:         sdk.WorkflowRunInfoLevelInfo,
+			Message:       fmt.Sprintf("Job %q: The condition is not satisfied", jobID),
+		})
+	}
+	return canRun, runInfos, nil
+}
+
+func computeRunStatusFromJobsStatus(ctx context.Context, db gorp.SqlExecutor, runID string, runAttempt int64, nbJob int) (sdk.V2WorkflowRunStatus, error) {
+	runJobs, err := workflow_v2.LoadRunJobsByRunID(ctx, db, runID, runAttempt)
+	if err != nil {
+		return "", err
+	}
+
+	finalStatus := sdk.V2WorkflowRunStatusSuccess
+	allJobID := make(map[string]struct{})
+	allSkipped := true
+
+	for _, rj := range runJobs {
+		if rj.Status != sdk.V2WorkflowRunJobStatusSkipped {
+			allSkipped = false
+		}
+		switch rj.Status {
+		case sdk.V2WorkflowRunJobStatusCancelled:
+			if finalStatus != sdk.V2WorkflowRunStatusStopped && finalStatus != sdk.V2WorkflowRunStatusFail && finalStatus.IsTerminated() {
+				finalStatus = sdk.V2WorkflowRunStatusCancelled
+			}
+		case sdk.V2WorkflowRunJobStatusFail:
+			if finalStatus != sdk.V2WorkflowRunStatusStopped && finalStatus.IsTerminated() && !rj.Job.ContinueOnError {
+				finalStatus = sdk.V2WorkflowRunStatusFail
+			}
+		case sdk.V2WorkflowRunJobStatusStopped:
+			if finalStatus.IsTerminated() {
+				finalStatus = sdk.V2WorkflowRunStatusStopped
+			}
+		default:
+			if !rj.Status.IsTerminated() {
+				finalStatus = sdk.V2WorkflowRunStatusBuilding
+			}
+		}
+		allJobID[rj.JobID] = struct{}{}
+	}
+
+	if len(allJobID) < nbJob && finalStatus.IsTerminated() {
+		finalStatus = sdk.V2WorkflowRunStatusBuilding
+	} else if len(allJobID) == nbJob && allSkipped {
+		finalStatus = sdk.V2WorkflowRunStatusSkipped
+	}
+	return finalStatus, nil
+}
+
+// Check and set default region on job
+func checkUserRegionRight(ctx context.Context, db gorp.SqlExecutor, rj *sdk.V2WorkflowRunJob, wrEnqueue sdk.V2WorkflowRunEnqueue, regionName string) (*sdk.V2WorkflowRunJobInfo, error) {
+	ctx, next := telemetry.Span(ctx, "checkUserRegionRight")
+	defer next()
+
+	wantedRegion, err := region.LoadRegionByName(ctx, db, regionName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if project has the right to execute job on region
+	projectHasPerm, err := rbac.HasRoleOnRegionProject(ctx, db, sdk.RegionRoleExecute, wantedRegion.ID, rj.ProjectKey)
+	if err != nil {
+		return nil, err
+	}
+	if !projectHasPerm {
+		return &sdk.V2WorkflowRunJobInfo{
+			WorkflowRunID:    rj.WorkflowRunID,
+			Level:            sdk.WorkflowRunInfoLevelError,
+			WorkflowRunJobID: rj.ID,
+			IssuedAt:         time.Now(),
+			Message:          fmt.Sprintf("job %s: project %s is not allowed to start job on region %q", rj.JobID, rj.ProjectKey, rj.Region),
+		}, nil
+	}
+
+	if !wrEnqueue.Initiator.IsAdminWithMFA {
+		if wrEnqueue.Initiator.IsUser() {
+			u, err := user.LoadByID(ctx, db, wrEnqueue.Initiator.UserID, user.LoadOptions.WithOrganization)
+			if err != nil {
+				return nil, err
+			}
+			org, err := organization.LoadOrganizationByName(ctx, db, u.Organization)
+			if err != nil {
+				return nil, err
+			}
+			canExecute, err := rbac.HasRoleOnRegion(ctx, db, sdk.RegionRoleExecute, wantedRegion.ID, wrEnqueue.Initiator.UserID, org.ID)
+			if err != nil {
+				return nil, err
+			}
+			if canExecute {
+				return nil, nil
+			}
+		} else {
+			canExecute, err := rbac.HasVCSUserRoleOnRegion(ctx, db, sdk.RegionRoleExecute, wantedRegion.ID, sdk.RBACVCSUser{VCSServer: wrEnqueue.Initiator.VCS, VCSUsername: wrEnqueue.Initiator.VCSUsername})
+			if err != nil {
+				return nil, err
+			}
+			if canExecute {
+				return nil, nil
+			}
+		}
+	} else {
+		return nil, nil
+	}
+
+	return &sdk.V2WorkflowRunJobInfo{
+		WorkflowRunID:    rj.WorkflowRunID,
+		Level:            sdk.WorkflowRunInfoLevelError,
+		WorkflowRunJobID: rj.ID,
+		IssuedAt:         time.Now(),
+		Message:          fmt.Sprintf("job %s: user %s does not have enough right on region %q", rj.JobID, wrEnqueue.Initiator.Username(), rj.Region),
+	}, nil
+}
+
+func checkJobNeeds(jobsContext sdk.JobsResultContext, jobDef sdk.V2Job) bool {
+	if len(jobDef.Needs) == 0 {
+		return true
+	}
+	for _, need := range jobDef.Needs {
+		if _, has := jobsContext[need]; !has {
+			return false
+		}
+	}
+	return true
+}
+
+func checkCanRunJob(ctx context.Context, db gorp.SqlExecutor, run sdk.V2WorkflowRun, jobInputs map[string]interface{}, jobDef sdk.V2Job, currentJobContext sdk.WorkflowRunJobsContext, initiator sdk.V2Initiator) (bool, error) {
+	ctx, next := telemetry.Span(ctx, "checkJobCondition")
+	defer next()
+
+	// Check job Gate
+	if jobDef.Gate != "" {
+		gate := run.WorkflowData.Workflow.Gates[jobDef.Gate]
+
+		// Check reviewers
+		reviewersChecked := len(gate.Reviewers.Users) == 0 && len(gate.Reviewers.Groups) == 0
+		if len(gate.Reviewers.Users) > 0 {
+			reviewersChecked = sdk.IsInArray(initiator.Username(), gate.Reviewers.Users)
+		}
+		if !reviewersChecked {
+			for _, g := range gate.Reviewers.Groups {
+				grp, err := group.LoadByName(ctx, db, g, group.LoadOptions.WithMembers)
+				if err != nil {
+					return false, err
+				}
+				reviewersChecked = sdk.IsInArray(initiator.UserID, grp.Members.UserIDs())
+				if reviewersChecked {
+					break
+				}
+			}
+		}
+		if !reviewersChecked && !initiator.IsAdminWithMFA {
+			return false, nil
+		}
+
+		// Create empty input context to be able to interpolate gate condition.
+		currentJobContext.Gate = make(map[string]interface{})
+		for k, v := range gate.Inputs {
+			if v.Default != nil {
+				currentJobContext.Gate[k] = v.Default
+			} else {
+				if v.Options != nil {
+					currentJobContext.Gate[k] = make([]interface{}, 0)
+				} else {
+					switch v.Type {
+					case "boolean":
+						currentJobContext.Gate[k] = false
+					case "number":
+						currentJobContext.Gate[k] = 0
+					default:
+						currentJobContext.Gate[k] = ""
+					}
+				}
+			}
+		}
+
+		// Insert a boolean parameter called "manual" automatically that will be useful to trigger a job manually through a gate without any other parameter.
+		// This parameter will override any user defined params called "manual". It's false by default and will be set to true on workflow manual run by the handler.
+		currentJobContext.Gate["manual"] = false
+
+		// Override with value sent by user
+		for k, v := range jobInputs {
+			if _, has := currentJobContext.Gate[k]; has {
+
+				// Check user gate inputs
+				if gateDefInput, ok := gate.Inputs[k]; ok && gateDefInput.Options != nil {
+					if !gateDefInput.Options.Multiple {
+						valueFound := false
+						for _, possibleValue := range gateDefInput.Options.Values {
+							if possibleValue == v {
+								valueFound = true
+								break
+							}
+						}
+						if !valueFound {
+							return false, sdk.NewErrorFrom(sdk.ErrWrongRequest, "gate input %s with value %v doesn't match %v", k, v, gateDefInput.Options.Values)
+						}
+					} else {
+						sliceValues, ok := v.([]interface{})
+						if !ok {
+							return false, sdk.NewErrorFrom(sdk.ErrWrongRequest, "gate input %s with value %v is not an array, got %T", k, v, v)
+						}
+						for _, sv := range sliceValues {
+							valueFound := false
+							for _, inputValue := range gateDefInput.Options.Values {
+								if inputValue == sv {
+									valueFound = true
+									break
+								}
+							}
+							if !valueFound {
+								return false, sdk.NewErrorFrom(sdk.ErrWrongRequest, "gate input %s with value %v doesn't match %v", k, v, gateDefInput.Options.Values)
+							}
+						}
+					}
+				}
+
+				currentJobContext.Gate[k] = v
+			}
+		}
+
+		gateConditionResult, err := checkCondition(ctx, gate.If, currentJobContext)
+		if err != nil {
+			return false, err
+		}
+		if !gateConditionResult {
+			return false, nil
+		}
+		if jobDef.If == "" {
+			return true, nil
+		}
+	}
+
+	// Check Job IF
+	jobIfResult, err := checkCondition(ctx, jobDef.If, currentJobContext)
+	if err != nil {
+		return false, err
+	}
+	return jobIfResult, nil
+}
+
+func checkCondition(ctx context.Context, condition string, currentJobContext sdk.WorkflowRunJobsContext) (bool, error) {
+	ctx, next := telemetry.Span(ctx, "checkCondition")
+	defer next()
+
+	if condition == "" {
+		condition = "${{success()}}"
+	}
+	if !strings.HasPrefix(condition, "${{") {
+		condition = fmt.Sprintf("${{ %s }}", condition)
+	}
+
+	bts, err := json.Marshal(currentJobContext)
+	if err != nil {
+		return false, sdk.WithStack(err)
+	}
+
+	var mapContexts map[string]interface{}
+	if err := json.Unmarshal(bts, &mapContexts); err != nil {
+		return false, sdk.WithStack(err)
+	}
+
+	ap := sdk.NewActionParser(mapContexts, sdk.DefaultFuncs)
+	booleanResult, err := ap.InterpolateToBool(ctx, condition)
+	if err != nil {
+		return false, sdk.NewErrorFrom(sdk.ErrInvalidData, "unable to parse statement %s into a boolean: %v", condition, err)
+	}
+	return booleanResult, nil
+}
+
+func (api *API) triggerBlockedWorkflowRun(ctx context.Context, wr sdk.V2WorkflowRun) error {
+	ctx = context.WithValue(ctx, cdslog.Workflow, wr.WorkflowName)
+	ctx, next := telemetry.Span(ctx, "api.triggerBlockedWorkflowRun")
+	defer next()
+
+	_, next = telemetry.Span(ctx, "api.triggerBlockedWorkflowRun.lock")
+	lockKey := cache.Key("api:workflow:engine", wr.ID)
+	b, err := api.Cache.Lock(lockKey, 5*time.Minute, 0, 1)
+	if err != nil {
+		next()
+		return err
+	}
+	if !b {
+		next()
+		return nil
+	}
+	next()
+	defer func() {
+		_ = api.Cache.Unlock(lockKey)
+	}()
+
+	log.Info(ctx, "triggerBlockedWorkflowRun: trigger workflow %s for run %d", wr.WorkflowName, wr.RunNumber)
+	if wr.Status != sdk.V2WorkflowRunStatusBuilding {
+		return nil
+	}
+
+	// Search last userID that trigger a job in this run
+	runJobs, err := workflow_v2.LoadRunJobsByRunID(ctx, api.mustDB(), wr.ID, wr.RunAttempt)
+	if err != nil {
+		return err
+	}
+	var lastJob sdk.V2WorkflowRunJob
+	runningWorkflow := false
+	hasBlockedRunJob := false
+	for _, rj := range runJobs {
+		if !rj.Status.IsTerminated() && rj.Status != sdk.V2WorkflowRunJobStatusBlocked {
+			runningWorkflow = true
+			continue
+		}
+		if rj.Status == sdk.V2WorkflowRunJobStatusBlocked {
+			hasBlockedRunJob = true
+			continue
+		}
+		if sdk.TimeSafe(rj.Started).After(sdk.TimeSafe(lastJob.Started)) {
+			lastJob = rj
+		}
+	}
+
+	if runningWorkflow && !hasBlockedRunJob {
+		return nil
+	}
+
+	initiator := &lastJob.Initiator
+	// No job have been triggered
+	if initiator.Username() == "" {
+		initiator = wr.Initiator
+	}
+
+	api.EnqueueWorkflowRun(ctx, wr.ID, *initiator, wr.WorkflowName, wr.RunNumber)
+	return nil
+}
+
+func (api *API) EnqueueWorkflowRunWithStatus(ctx context.Context, runID string, initiator sdk.V2Initiator, workflowName string, runNumber int64, status sdk.V2WorkflowRunStatus) {
+	enqueueRequest := sdk.V2WorkflowRunEnqueue{
+		RunID:                    runID,
+		Initiator:                initiator,
+		DeprecatedUserID:         initiator.UserID,
+		DeprecatedIsAdminWithMFA: initiator.IsAdminWithMFA,
+		Status:                   status,
+	}
+	api.enqueueWorkflowRun(ctx, enqueueRequest, workflowName, runNumber)
+}
+
+func (api *API) EnqueueWorkflowRun(ctx context.Context, runID string, initiator sdk.V2Initiator, workflowName string, runNumber int64) {
+	// Continue workflow
+	enqueueRequest := sdk.V2WorkflowRunEnqueue{
+		RunID:                    runID,
+		Initiator:                initiator,
+		DeprecatedUserID:         initiator.UserID,
+		DeprecatedIsAdminWithMFA: initiator.IsAdminWithMFA,
+	}
+	api.enqueueWorkflowRun(ctx, enqueueRequest, workflowName, runNumber)
+}
+
+// enqueueWorkflowRunLater requests an engine pass after a delay, without holding an engine goroutine meanwhile
+func (api *API) enqueueWorkflowRunLater(request sdk.V2WorkflowRunEnqueue, name string, runNumber int64, delay time.Duration) {
+	api.GoRoutines.Exec(context.Background(), "enqueueWorkflowRunLater."+request.RunID, func(ctx context.Context) {
+		time.Sleep(delay)
+		api.enqueueWorkflowRun(ctx, request, name, runNumber)
+	})
+}
+
+func (api *API) enqueueWorkflowRun(ctx context.Context, request sdk.V2WorkflowRunEnqueue, name string, runNumber int64) {
+	select {
+	case api.workflowRunTriggerChan <- request:
+		log.Debug(ctx, "workflow run %s %d trigger in chan", name, runNumber)
+	default:
+		if err := api.Cache.Enqueue(workflow_v2.WorkflowEngineKey, request); err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+		}
+	}
+}
+
+// workflowRunV2TriggerUnlocking releases a run blocked by its concurrency once it gets a slot, then re-enqueues it.
+// It never cancels: a superseded run is cancelled by the arrival of the newer one.
+func (api *API) workflowRunV2TriggerUnlocking(ctx context.Context, run *sdk.V2WorkflowRun, wrEnqueue sdk.V2WorkflowRunEnqueue) error {
+	concurrencyKey := getConcurrencyUniqueKey(*run.Concurrency, run.ProjectKey, run.VCSServer, run.Repository, run.WorkflowName)
+	lockKey := cache.Key("api:workflow:concurrency:enqueue", concurrencyKey)
+	b, err := api.Cache.Lock(lockKey, 1*time.Minute, 0, 1)
+	if err != nil {
+		return err
+	}
+	if !b {
+		log.Info(ctx, "concurrency %q already locked", concurrencyKey)
+		api.enqueueWorkflowRunLater(wrEnqueue, run.WorkflowName, run.RunNumber, 2*time.Second)
+		return nil
+	}
+	defer api.Cache.Unlock(lockKey)
+
+	toUnlock, _, err := retrieveRunObjectsToUnLocked(ctx, api.mustDB(), run.ProjectKey, run.VCSServer, run.Repository, run.WorkflowName, *run.Concurrency)
+	if err != nil {
+		return err
+	}
+
+	found := false
+	for _, u := range toUnlock {
+		if u.ID == run.ID {
+			found = true
+			run.Status = sdk.V2WorkflowRunStatusBuilding
+			break
+		}
+	}
+	if !found {
+		log.Info(ctx, "workflow %s/%s/%s/%s %d still blocked", run.ProjectKey, run.VCSServer, run.Repository, run.WorkflowName, run.RunNumber)
+		return nil
+	}
+	tx, err := api.mustDB().Begin()
+	if err != nil {
+		return sdk.WithStack(err)
+	}
+	defer tx.Rollback()
+
+	if err := workflow_v2.UpdateRun(ctx, tx, run); err != nil {
+		return err
+	}
+
+	if err := workflow_v2.InsertRunInfo(ctx, tx, &sdk.V2WorkflowRunInfo{
+		WorkflowRunID: run.ID,
+		IssuedAt:      time.Now(),
+		Level:         sdk.WorkflowRunInfoLevelInfo,
+		Message:       "Workflow has been unlocked",
+	}); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return sdk.WithStack(err)
+	}
+	api.EnqueueWorkflowRun(ctx, wrEnqueue.RunID, wrEnqueue.Initiator, run.WorkflowName, run.RunNumber)
+	return nil
+}

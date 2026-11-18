@@ -1,0 +1,10 @@
+<div class="wrapper">
+    <app-breadcrumb [path]="path">
+        <button nz-button nzType="primary" class="buttonBreadcrumb"
+                [routerLink]="['add']">Add</button>
+    </app-breadcrumb>
+    <app-scrollview class="scrollview">
+        <app-data-table [withFilter]="filter" [columns]="columns" [data]="workerModelPatterns" [loading]="loading">
+        </app-data-table>
+    </app-scrollview>
+</div>

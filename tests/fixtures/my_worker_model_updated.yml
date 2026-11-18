@@ -1,0 +1,14 @@
+name: myITModel
+group: shared.infra
+image: foo/model/go:latest
+description: my worker model
+type: docker
+envs:
+  CDS_GRAYLOG_EXTRA_KEY: '{{.GraylogExtraKey}}'
+  CDS_GRAYLOG_EXTRA_VALUE: '{{.GraylogExtraValue}}'
+  CDS_GRAYLOG_HOST: '{{.GraylogHost}}'
+  CDS_GRAYLOG_PORT: '{{.GraylogPort}}'
+  atest: this is an env test
+shell: sh -c
+cmd: worker --api={{.API}} --token={{.Token}} --basedir={{.BaseDir}} --model={{.Model}} --name={{.Name}} --hatchery={{.Hatchery}} --hatchery-name={{.HatcheryName}} --insecure={{.HTTPInsecure}} --single-use
+

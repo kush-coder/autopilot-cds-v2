@@ -1,0 +1,21 @@
+:host {
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+}
+
+.list {
+  flex: 1;
+  overflow: hidden;
+}
+
+nz-alert {
+  margin: 10px;
+}
+
+.disabledKey {
+  font-style: italic;
+  opacity: 0.65;
+}

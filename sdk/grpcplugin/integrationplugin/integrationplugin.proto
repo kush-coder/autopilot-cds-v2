@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "com.ovh.cds.sdk.grpcplugin.integrationplugin";
+option java_outer_classname = "IntegrationPluginProto";
+option go_package = "integrationplugin";
+
+package integrationplugin;
+
+import "google/protobuf/empty.proto";
+
+// To generate the go files run:
+// libprotoc 3.10.1
+// go get -u github.com/golang/protobuf/protoc-gen-go@v1.3.5
+// protoc --go_out=plugins=grpc:. *.proto
+
+message IntegrationPluginManifest {
+    string name = 1;
+    string version = 2;
+    string description = 3;
+    string author = 4;
+}
+
+message RunQuery {
+    map<string, string> options = 1;
+}
+
+message RunResult {
+    string status = 1;
+    string details = 2;
+    map<string, string> outputs = 3;
+}
+
+message WorkerHTTPPortQuery {
+    int32 port = 1;
+}
+
+service IntegrationPlugin {
+    rpc Manifest (google.protobuf.Empty) returns (IntegrationPluginManifest) {}
+    rpc Run (RunQuery) returns (RunResult) {}
+    rpc WorkerHTTPPort (WorkerHTTPPortQuery) returns (google.protobuf.Empty) {}
+    rpc Stop (google.protobuf.Empty) returns (google.protobuf.Empty) {}
+}

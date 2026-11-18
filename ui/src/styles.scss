@@ -1,0 +1,645 @@
+/* You can add global styles to this file, and also import other style files */
+
+@use "common" as common;
+
+@use "@fontsource/lato";
+@use "@fontsource/lato/400.css" as lato400;
+@use "@fontsource/lato/400-italic.css" as lato400Italic;
+@use "@fontsource/lato/700.css" as lotaa700;
+@use "@fontsource/lato/700-italic.css" as lato700Italic;
+
+html,
+body {
+    overflow-y: hidden;
+}
+
+// Monaco decoration marking a `uses:` / `runs-on:` value that can be followed to
+// its definition. Global because Monaco renders outside component styling.
+.cds-source-link {
+    color: #177ddc !important;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+// Screenreader-only content: visually hidden, still announced by AT.
+.cds-sr-only {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
+// Skip link: rendered off-screen, becomes visible only while keyboard-focused.
+.cds-skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 2000;
+    padding: 8px 16px;
+    background: #fff;
+    color: #1890ff;
+    border: 1px solid #d4d4d5;
+    border-radius: 0 0 3px 3px;
+
+    &:focus {
+        left: 0;
+    }
+}
+
+// Programmatic focus target for the skip link; no visible ring on the page body.
+#main-content:focus {
+    outline: none;
+}
+
+// Action row of a form rendered inside a nz-modal that opts out of the default footer.
+.cds-modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 24px;
+}
+
+.app-loader {
+    position: absolute;
+    top: 50%;
+    width: 100%;
+    text-align: center;
+    font-size: 3em;
+
+    .anticon {
+        margin-right: 15px;
+    }
+}
+
+textarea:read-only {
+    color: rgba(0, 0, 0, .85);
+    opacity: 0.45;
+}
+
+.entity-card {
+    width: 100%;
+    height: 100px;
+    padding: 1em;
+    border-radius: 3px;
+    border: 1px solid #d4d4d5;
+    background: #fff;
+}
+
+.entity-card:hover {
+    margin-top: -2px;
+}
+
+nz-collapse.fullheight {
+    .ant-collapse-content {
+        overflow-y: auto;
+    }
+}
+
+.nzSegment {
+    display: flex;
+    flex: auto;
+    flex-direction: column;
+    min-height: 0;
+    border: 1px solid rgba(34, 36, 38, .15);
+    border-radius: 2px;
+}
+
+nz-breadcrumb-item {
+    font-size: 1.2em;
+}
+
+i.info {
+    color: common.$cds_color_teal;
+}
+
+nz-card.redTitle {
+    .ant-card-head {
+        min-height: 44px;
+        background-color: #ff4d4f;
+        color: white;
+    }
+
+    .ant-card-head-title {
+        padding: 8px 0;
+    }
+}
+
+nz-card.coloredTitle {
+    .ant-card-head {
+        min-height: 44px;
+        background-color: #EEEEEE;
+    }
+
+    .ant-card-head-title {
+        padding: 8px 0;
+    }
+}
+
+.inner-content {
+    background-color: #fff;
+}
+
+.ant-layout-header {
+    padding: 0 !important;
+}
+
+input[type=radio]:read-only {
+    opacity: 0;
+}
+
+input[type=checkbox]:read-only {
+    opacity: 0;
+}
+
+a.disabled {
+    color: gray;
+    cursor: not-allowed;
+    text-decoration: underline;
+}
+
+a.disabled:hover {
+    color: gray;
+    cursor: not-allowed;
+    text-decoration: underline;
+
+    .content {
+        color: gray;
+    }
+}
+
+.right.floated {
+    float: right;
+}
+
+.CodeMirror {
+    min-height: 40px;
+    height: auto;
+    border: 1px solid rgba(34, 36, 38, 0.14902);
+    border-radius: 4px;
+}
+
+// Dragula mirror item  (append on body)
+.gu-mirror {
+    margin: 10px;
+    padding: 10px;
+    background-color: rgba(0, 0, 0, 0.2);
+    transition: opacity 0.4s ease-in-out;
+}
+
+// Code mirror
+.CodeMirror-scroll {
+    text-align: left;
+    height: auto;
+    overflow: hidden !important;
+}
+
+.CodeMirror-empty {
+    color: common.$polar_grey_2 !important;
+}
+
+app-workflow-admin .CodeMirror-scroll {
+    min-height: 180px;
+}
+
+.CodeMirror-wrap pre.CodeMirror-line {
+    word-break: break-all;
+}
+
+.fullheight {
+    .CodeMirror {
+        height: 100% !important;
+        max-height: 100%;
+    }
+
+    // Code mirror
+    .CodeMirror-scroll {
+        height: 100% !important;
+        max-height: 100%;
+        overflow: auto !important;
+    }
+}
+
+.payload {
+    .CodeMirror {
+        max-height: 500px;
+    }
+
+    .CodeMirror-scroll {
+        max-height: 500px;
+    }
+}
+
+// Override semantic-ui to show warning in form
+.ui.form .warning.message,
+.ui.form .error.message {
+    display: inherit;
+}
+
+.message {
+    overflow: hidden;
+}
+
+.toast {
+    padding: 0;
+    margin: 0;
+}
+
+.toast-close-button {
+    right: -3px;
+}
+
+// dropdown
+.ui.buttons {
+    sm-dropdown>.ui.dropdown:last-child .menu {
+        left: auto;
+        right: 0;
+    }
+
+    &.right.floated {
+        .button:first-child {
+            margin-left: 0.25em;
+        }
+    }
+}
+
+.ui.selection.dropdown {
+    width: 100%;
+    min-width: 0;
+}
+
+.ui.selection.classic.dropdown {
+    width: auto;
+    min-width: 14em;
+}
+
+.ui.circular.labels .label,
+.ui.circular.label {
+    min-width: inherit;
+    min-height: inherit;
+}
+
+// icon
+i.warning {
+    color: common.$cds_color_red !important;
+}
+
+.ui {
+    i.icon.blue {
+        color: common.$cds_color_teal !important;
+    }
+
+    i.icon.red {
+        color: common.$cds_color_red !important;
+    }
+
+    i.icon.green {
+        color: common.$cds_color_green !important;
+    }
+}
+
+// Segment
+.ui.green.segment {
+    border-top-color: common.$cds_color_green !important;
+}
+
+.ui.red.segment {
+    border-top-color: common.$cds_color_red !important;
+}
+
+.ui.blue.segment {
+    border-top-color: common.$cds_color_teal !important;
+}
+
+// Button
+.ui.green.basic.button {
+    background-color: transparent !important;
+}
+
+.ui.green.button:active {
+    color: #000000;
+}
+
+.ui.green.button.loading.disabled {
+    opacity: 0.8 !important;
+}
+
+.ui.green.button.loading:after {
+    border-color: #000000 transparent transparent;
+}
+
+.ui.red.button {
+    background-color: common.$cds_color_red !important;
+}
+
+.ui.red.basic.button {
+    background-color: transparent !important;
+}
+
+.ui.red.button:active {
+    color: #000000;
+}
+
+.ui.red.button.loading.disabled {
+    opacity: 0.8 !important;
+}
+
+.ui.red.button.loading:after {
+    border-color: #000000 transparent transparent;
+}
+
+.ui.blue.button {
+    background-color: common.$cds_color_teal !important;
+}
+
+.ui.blue.basic.button {
+    background-color: transparent !important;
+}
+
+.ui.blue.button:active {
+    color: #000000;
+}
+
+// Column
+.centered.column {
+    text-align: center;
+}
+
+.ui.grid {
+    .wide.twelve {
+        width: 75% !important;
+    }
+
+    .wide.sixteen {
+        width: 100% !important;
+    }
+}
+
+// Ribbon
+.ui.green.ribbon {
+    background-color: common.$cds_color_green !important;
+    color: black !important;
+}
+
+.ui.red.ribbon {
+    background-color: common.$cds_color_red !important;
+    color: black !important;
+}
+
+.ui.blue.ribbon {
+    background-color: common.$cds_color_teal !important;
+    color: black !important;
+}
+
+// Circular Label
+.ui.blue.circular.label {
+    background-color: common.$cds_color_teal !important;
+}
+
+// Loader
+.ui.blue.loader:after {
+    border-top-color: common.$cds_color_teal;
+    border-right-color: transparent;
+    border-bottom-color: transparent;
+    border-left-color: transparent;
+}
+
+// Field
+.right.aligned.field {
+    text-align: right;
+}
+
+// card
+.ui.card {
+    width: auto;
+}
+
+.ui.card>.content>.description {
+    overflow-wrap: break-word;
+}
+
+.inline {
+    display: inline;
+}
+
+// Modal
+.ui.modal.basic.warning {
+    font-size: 1.25em;
+}
+
+// dropdown zindex
+.workflow.grid {
+    .dropdown.icon {
+        position: relative;
+        border: 1px solid #cac9c9;
+        border-radius: 3px;
+        padding: 5px;
+        height: 25px;
+    }
+
+    .dropdown.icon:active {
+        background-color: #cac9c9;
+        border-color: white;
+        color: white;
+    }
+}
+
+.pointing,
+.pointer {
+    cursor: pointer;
+}
+
+// Don't know why it's not working on navbar.scss
+.navbar {
+    .ui.dropdown {
+        background-color: transparent;
+        border-color: rgba(34, 36, 38, 0.35);
+
+        &.item {
+            i {
+                color: white;
+                opacity: 1;
+            }
+        }
+    }
+
+    .ui.selection.dropdown {
+        color: rgba(191, 191, 191, 0.87);
+    }
+
+    .ui.right.dropdown {
+        border-bottom-left-radius: 0;
+        border-top-left-radius: 0;
+        border-left: none;
+    }
+
+    .ui.left.dropdown {
+        border-bottom-right-radius: 0;
+        border-top-right-radius: 0;
+    }
+}
+
+// Toast global settings
+.toast-top-right {
+    top: common.$navbarHeight + 10px;
+}
+
+.ui.dropdown.nocaret {
+    .dropdown.icon {
+        display: none;
+    }
+}
+
+// Hack navbar select language
+.ui.dropdown.languageSelect {
+    min-width: 1em;
+    border: none;
+
+    .dropdown.icon {
+        display: none;
+    }
+
+    padding-right: 1em;
+
+    >.text>.flag {
+        margin-right: 0;
+    }
+}
+
+ngui-auto-complete {
+    height: 200px;
+    overflow-y: auto;
+}
+
+ngui-auto-complete .no-match-found {
+    display: none;
+    border: none;
+}
+
+.node {
+    white-space: nowrap;
+}
+
+.node rect,
+.node circle {
+    fill: transparent;
+}
+
+.node ellipse {
+    stroke: #333;
+    fill: white;
+    stroke-width: 1.5px;
+}
+
+.cluster rect,
+polygon {
+    stroke: #333;
+    fill: transparent;
+    fill-opacity: 0.1;
+    stroke-width: 1.5px;
+}
+
+.edgePath path.path {
+    stroke: #333;
+    stroke-width: 4px;
+    fill: none;
+}
+
+foreignObject {
+    overflow: visible;
+}
+
+.codeAdded {
+    background-color: #cdffd8;
+
+    .night & {
+        background-color: common.$darkTheme_night_green;
+    }
+}
+
+.codeRemoved {
+    background-color: #ffeef0;
+
+    .night & {
+        background-color: common.$darkTheme_night_red;
+    }
+}
+
+.wrapper {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.scrollview {
+    flex: 1;
+}
+
+.buttonBreadcrumb {
+    position: relative;
+    top: -7px;
+}
+
+.bottomBtnsWrapper {
+    z-index: 5; // an index to be over all codemirror elements
+}
+
+[ng-reflect-router-link] {
+    cursor: pointer;
+}
+
+.navbar-suggestion,
+.navbar-bookmark {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    overflow: hidden;
+    color: inherit;
+
+    &:hover {
+        color: #177ddc;
+    }
+
+    .title {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+
+        .label {
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            overflow: hidden;
+        }
+
+        .id {
+            flex: 1;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            margin-left: 5px;
+            margin-right: 5px;
+            overflow: hidden;
+            color: rgba(0, 0, 0, .45);
+
+            .night & {
+                color: rgba(255, 255, 255, 0.45);
+            }
+        }
+    }
+}
+
+.navbar-bookmark {
+    width: 250px !important;
+
+    nz-tag {
+        margin: 0;
+    }
+}
+
+.monaco-editor {
+    outline: unset !important;
+}

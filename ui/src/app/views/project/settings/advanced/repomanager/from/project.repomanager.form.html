@@ -1,0 +1,127 @@
+<nz-modal
+  [nzTitle]="isEditing ? 'Edit Repository Manager - ' + vcsProject.type : 'New Repository Manager'"
+  [nzVisible]="visible"
+  (nzOnCancel)="cancel()"
+  nzWidth="700px">
+  <div *nzModalContent>
+    <nz-spin [nzSpinning]="loading">
+      @if (vcsProject) {
+        <form nz-form>
+          <!-- Type selector: editable only on create, read-only on edit -->
+          @if (!isEditing) {
+            <nz-form-item nz-rows>
+              <nz-form-label [nzSm]="6" nzFor="cds-field-vcs-type">Type</nz-form-label>
+              <nz-form-control [nzSm]="14">
+                <nz-select id="cds-field-vcs-type" [(ngModel)]="vcsProject.type" name="type" nzPlaceholder="Select a type">
+                  @for (t of reposManagerList; track t) {
+                    <nz-option [nzValue]="t" [nzLabel]="t"></nz-option>
+                  }
+                </nz-select>
+              </nz-form-control>
+            </nz-form-item>
+          }
+          @if (isEditing) {
+            <nz-form-item nz-rows>
+              <nz-form-label [nzSm]="6" nzFor="cds-field-vcs-type">Type</nz-form-label>
+              <nz-form-control [nzSm]="14">
+                <input nz-input type="text" id="cds-field-vcs-type" disabled [(ngModel)]="vcsProject.type" name="type">
+              </nz-form-control>
+            </nz-form-item>
+          }
+          <nz-form-item nz-rows>
+            <nz-form-label [nzSm]="6" nzFor="cds-field-vcs-name">Name</nz-form-label>
+            <nz-form-control [nzSm]="14">
+              <input nz-input type="text" id="cds-field-vcs-name" [(ngModel)]="vcsProject.name" name="name">
+            </nz-form-control>
+          </nz-form-item>
+          <nz-form-item nz-rows>
+            <nz-form-label [nzSm]="6" nzFor="cds-field-vcs-description">Description</nz-form-label>
+            <nz-form-control [nzSm]="14">
+              <input nz-input type="text" id="cds-field-vcs-description" [(ngModel)]="vcsProject.description" name="description">
+            </nz-form-control>
+          </nz-form-item>
+          <nz-form-item nz-rows>
+            <nz-form-label [nzSm]="6" nzFor="cds-field-vcs-url">URL</nz-form-label>
+            <nz-form-control [nzSm]="14">
+              <input nz-input type="text" id="cds-field-vcs-url" [(ngModel)]="vcsProject.url" name="url">
+            </nz-form-control>
+          </nz-form-item>
+          <nz-form-item>
+            <h3>Options</h3>
+            You can configure some options for the VCS Server. You can choose if CDS have to send build status (on your commit)
+            and if this build status contains a link to your CDS Instance.
+          </nz-form-item>
+          <nz-form-item>
+            <label nz-checkbox [(ngModel)]="vcsProject.options.disableStatus" name="disableStatus">
+              <span>Disable build status</span>
+            </label>
+          </nz-form-item>
+          <nz-form-item>
+            <label nz-checkbox [(ngModel)]="vcsProject.options.disableStatusDetails" name="disableStatusDetails">
+              <span>Disable status details</span>
+            </label>
+          </nz-form-item>
+          @if (vcsProject.type === 'github') {
+            <nz-form-item>
+              <label nz-checkbox [(ngModel)]="vcsProject.options.disablePolling" name="disablePolling">
+                <span>Disable polling. Polling is only supported by GitHub to let CDS use polling (instead of webhook) to be triggered.</span>
+              </label>
+            </nz-form-item>
+          }
+          <nz-form-item>
+            <label nz-checkbox [(ngModel)]="vcsProject.options.disableWebhooks" name="disableWebhooks">
+              <span>Disable webhooks. You can disable webhooks you don't want to let CDS creating and using webhook to be triggered.</span>
+            </label>
+          </nz-form-item>
+          <nz-form-item>
+            <h3>Authentication</h3>
+            CDS needs to call VCS API (getting repos, commits, etc...). These fields are mandatory.
+          </nz-form-item>
+          <nz-form-item nz-rows>
+            <nz-form-label [nzSm]="6" nzFor="cds-field-vcs-username">Username</nz-form-label>
+            <nz-form-control [nzSm]="14">
+              <input nz-input type="text" id="cds-field-vcs-username" [(ngModel)]="vcsProject.auth.username" name="username">
+            </nz-form-control>
+          </nz-form-item>
+          <nz-form-item>
+            <nz-form-label [nzSm]="6" nzFor="cds-field-vcs-token">Token</nz-form-label>
+            <nz-form-control [nzSm]="14">
+              <input nz-input type="password" id="cds-field-vcs-token" [(ngModel)]="vcsProject.auth.token" name="token">
+            </nz-form-control>
+          </nz-form-item>
+          <nz-form-item>
+            <nz-form-label [nzSm]="6">SSH key</nz-form-label>
+            <nz-form-control [nzSm]="14">
+              <app-parameter-value [editList]="false" [edit]="true" [type]="'ssh-key'" [keys]="keys"
+                [(value)]="vcsProject.auth.sshKeyName" (valueChange)="updatePublicKey($event)">
+              </app-parameter-value>
+            </nz-form-control>
+            @if (selectedPublicKey) {
+              <button nz-button [title]="'key_copy_public' | translate" [attr.aria-label]="'key_copy_public' | translate" ngxClipboard
+                [cbContent]="selectedPublicKey" (click)="clickCopyKey()">
+                <i nz-icon nzType="copy" nzTheme="outline" aria-hidden="true"></i>
+              </button>
+            }
+          </nz-form-item>
+        </form>
+      }
+    </nz-spin>
+  </div>
+  <div *nzModalFooter>
+    <nz-row>
+      @if (isEditing) {
+        <nz-col [nzSpan]="4">
+          <button nz-button nzType="primary" nzDanger nz-popconfirm
+            nzPopconfirmTitle="Are you sure you want to delete this repository manager?"
+          [nzLoading]="loading" (nzOnConfirm)="delete()">Delete</button>
+        </nz-col>
+      }
+      <nz-col [nzSpan]="isEditing ? 20 : 24" class="footer-actions">
+        <button nz-button nzType="primary" [nzLoading]="loading" (click)="save()">
+          {{ isEditing ? 'Save' : 'Add' }}
+        </button>
+        <button nz-button name="cancel" (click)="cancel()">Cancel</button>
+      </nz-col>
+    </nz-row>
+  </div>
+</nz-modal>

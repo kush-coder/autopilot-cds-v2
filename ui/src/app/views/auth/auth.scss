@@ -1,0 +1,18 @@
+@use '../../../common' as common;
+
+.auth {
+
+
+  .column {
+    width: 600px;
+  }
+
+  .nzSegment {
+    padding: 30px 30px;
+  }
+
+  .logo {
+    margin: 60px auto;
+    height: 100px;
+  }
+}

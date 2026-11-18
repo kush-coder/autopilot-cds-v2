@@ -1,0 +1,35 @@
+<div class="workflowHook pointing" nz-popover nzPopoverTrigger="click" nzPopoverPlacement="right"
+  [nzPopoverContent]="popupHook" [(nzPopoverVisible)]="menuVisible">
+  @if (hookEvent && hookEvent.parent_workflow && !hookEvent.parent_workflow.name) {
+    @if (icon === 'bitbucket') {
+      @if (hookEvent.uuid !== hook.uuid) {
+        @if (icon === 'bitbucket') {
+          <app-bitbucket-icon></app-bitbucket-icon>
+        }
+      }
+      @if (hookEvent.uuid === hook.uuid) {
+        @if (icon === 'bitbucket') {
+          <app-bitbucket-icon-success></app-bitbucket-icon-success>
+        }
+      }
+    }
+    @if (icon !== 'bitbucket') {
+      <i nz-icon nzType="{{icon | lowercase }}" nzTheme="outline" [class.green]="hookEvent.uuid === hook.uuid"></i>
+    }
+  }
+  @if (hookEvent && hookEvent.parent_workflow && hookEvent.parent_workflow.name) {
+    <i nz-icon nzType="{{icon | lowercase }}" nzTheme="outline" [class.green]="hookEvent.uuid === hook.uuid"
+    nz-tooltip nzTooltipTitle="{{hookEvent.parent_workflow.key}}/{{hookEvent.parent_workflow.name}} #{{hookEvent.parent_workflow.run}}" role="img" aria-label="{{hookEvent.parent_workflow.key}}/{{hookEvent.parent_workflow.name}} #{{hookEvent.parent_workflow.run}}"></i>
+  }
+  @if (!hookEvent || !hookEvent.parent_workflow) {
+    @if (icon === 'bitbucket') {
+      <app-bitbucket-icon></app-bitbucket-icon>
+    }
+    @if (icon !== 'bitbucket') {
+      <i nz-icon nzType="{{icon | lowercase}}" nzTheme="outline"></i>
+    }
+  }
+</div>
+<ng-template #popupHook>
+  <app-workflow-menu-hook-edit (event)="receivedEvent($event)" [readonly]="isReadOnly" [workflow]="workflow" [hook]="hook" [hookEventUUID]="hookEvent?.uuid" #menuHook></app-workflow-menu-hook-edit>
+</ng-template>

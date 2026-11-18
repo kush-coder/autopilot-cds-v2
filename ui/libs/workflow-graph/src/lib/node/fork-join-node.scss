@@ -1,0 +1,76 @@
+@use "../../../../../src/common.scss";
+
+:host {
+    display: block;
+    height: 100%;
+    width: 100%;
+}
+
+.node {
+    width: 20px;
+    height: 20px;
+    border-radius: 10px;
+    border: 2px solid common.$polar_grey_3;
+    color: common.$polar_grey_1;
+    padding: 2px;
+    background-color: white;
+
+    :host-context(.night) & {
+        background-color: common.$darkTheme_grey_1;
+        border-color: common.$darkTheme_grey_5;
+        color: common.$darkTheme_grey_6;
+
+        a {
+            color: common.$polar_grey_4;
+        }
+
+        &.success {
+            background-color: common.$darkTheme_night_green;
+            border-color: common.$darkTheme_green;
+        }
+
+        &.fail {
+            background-color: common.$darkTheme_night_red;
+            border-color: common.$darkTheme_red;
+        }
+
+        &.inactive {
+            background-color: common.$darkTheme_night_grey;
+            border-color: grey;
+        }
+
+        &.active,
+        &.highlight {
+            border-color: white;
+        }
+    }
+
+    &.success {
+        background-color: common.$cds_color_light_green;
+        border-color: common.$cds_color_green;
+    }
+
+    &.fail {
+        background-color: common.$cds_color_light_red;
+        border-color: common.$cds_color_red;
+    }
+
+    &.building {
+        background-color: common.$cds_color_light_teal;
+        border-color: common.$cds_color_teal;
+    }
+
+    &.inactive {
+        background-color: common.$cds_color_light_grey;
+        border-color: grey;
+    }
+
+    &.active {
+        border: 3px solid common.$polar_grey_0;
+        padding: 1px;
+    }
+
+    &.highlight {
+        border-color: common.$polar_grey_0;
+    }
+}

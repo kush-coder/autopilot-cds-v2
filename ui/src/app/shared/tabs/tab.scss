@@ -1,0 +1,14 @@
+@use '../../../common' as common;
+
+.green {
+  color: common.$cds_color_green;
+}
+.red {
+  color: common.$cds_color_red;
+}
+.orange {
+  color: common.$cds_color_orange;
+}
+.blue {
+  color: common.$cds_color_teal;
+}

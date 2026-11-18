@@ -1,0 +1,112 @@
+<div *ngIf="detailedWorkflow && project; then workflowPart;else loadingPart"></div>
+<ng-template #workflowPart>
+    <div class="workflowShow">
+        <app-tabs [tabs]="tabs" (onSelect)="selectTab($event)"></app-tabs>
+        <ng-container *ngIf="editMode && !isReadOnly">
+            <nz-space-compact class="ascodeButton">
+                <ng-container *ngIf="editModeWorkflowChanged">
+                    <button nz-button nzType="default" (click)="rollbackWorkflow()">{{'common_cancel' | translate }}</button>
+                </ng-container>
+                    <button nz-button nzType="primary" [disabled]="!editModeWorkflowChanged" (click)="saveWorkflow()">{{'btn_save_workflow' | translate }}</button>
+            </nz-space-compact>
+        </ng-container>
+        <div *ngIf="selectedTab.key === 'workflows'" class="workflowShowGraph">
+            <nz-row>
+                <nz-col [nzSpan]="18" [nzOffset]="3" >
+                    <nz-card [nzTitle]="null">
+                        <nz-row>
+                            <nz-col [nzSpan]="7">
+                                <button nz-button *ngIf="direction === 'TB'" class="direction"
+                                        (click)="changeDirection()">
+                                    <i nz-icon nzType="arrow-right" nzTheme="outline" aria-hidden="true"></i>
+                                    Workflow layout
+                                </button>
+                                <button nz-button *ngIf="direction === 'LR'" class="direction"
+                                        (click)="changeDirection()">
+                                    <i nz-icon nzType="arrow-down" nzTheme="outline" aria-hidden="true"></i>
+                                    Workflow layout
+                                </button>
+                            </nz-col>
+                            <nz-col [nzSpan]="10" class="center">
+                                <button nz-button nzType="primary" (click)="showAsCodeEditor()"
+                                     [nzLoading]="loading">
+                                    <i nz-icon nzType="code" nzTheme="outline" aria-hidden="true"></i>
+                                    Edit as code
+                                    <i nz-icon nzType="warning" nzTheme="outline" class="orange" *ngIf="previewWorkflow"
+                                        role="img" aria-label="Your workflow is in preview mode"
+                                        nz-tooltip nzTooltipTitle="Your workflow is in preview mode"></i>
+                                </button>
+                                <button nz-button nzType="primary" *ngIf="previewWorkflow"
+                                     (click)="savePreview()" class="savePreview"
+                                     [class.disabled]="!detailedWorkflow.permissions.writable"
+                                     [nzLoading]="loading">
+                                    <i nz-icon nzType="save" nzTheme="outline" aria-hidden="true"></i>Save
+                                </button>
+                            </nz-col>
+                            <nz-col [nzSpan]="7" class="alignRight">
+                                <button nz-button nzType="primary"
+                                     [disabled]="!detailedWorkflow.permissions.executable || editModeWorkflowChanged"
+                                     (click)="runWithParameter()" [nzLoading]="loading">
+                                    Run workflow
+                                </button>
+                            </nz-col>
+                        </nz-row>
+                    </nz-card>
+                </nz-col>
+            </nz-row>
+            <app-workflow-graph *ngIf="detailedWorkflow" [workflowData]="previewWorkflow || detailedWorkflow"
+                [project]="project" [direction]="direction"></app-workflow-graph>
+        </div>
+        <app-scrollview class="scrollview" *ngIf="selectedTab.key !== 'workflows'" [ngSwitch]="selectedTab.key">
+            <div *ngSwitchCase="'notifications'">
+                <app-workflow-notification-list [project]="project" [workflow]="detailedWorkflow" [editMode]="editMode"
+                    [readOnly]="isReadOnly"></app-workflow-notification-list>
+            </div>
+            <div *ngSwitchCase="'permissions'" class="padded">
+                <h3>{{ 'workflow_permission_list_title' | translate }}</h3>
+                <nz-alert *ngIf="detailedWorkflow && groupsOutsideOrganization && groupsOutsideOrganization.length > 0"
+                          nzType="warning" [nzMessage]="permTmpl"></nz-alert>
+                    <ng-template #permTmpl>
+                    Following groups that are not from organization
+                    "{{detailedWorkflow.organization}}" can read the workflow: <span
+                        *ngFor="let gp of groupsOutsideOrganization;let i = index">{{gp.group.name}}
+                        ({{gp.group.organization}}){{ i < groupsOutsideOrganization.length - 1 ? ', ' : '' }}</span>.
+                    </ng-template>
+                <app-permission-list [permissions]="this.groups" (event)="groupManagement($event)"
+                    [edit]="detailedWorkflow.permissions.writable && !(detailedWorkflow.from_repository && detailedWorkflow.from_repository.length > 0)">
+                </app-permission-list>
+                <ng-container
+                    *ngIf="detailedWorkflow.permissions.writable && !(detailedWorkflow.from_repository && detailedWorkflow.from_repository.length > 0)">
+                    <h3>{{ 'workflow_permission_form_title' | translate }}</h3>
+                    <app-workflow-permission-form [groups]="project.groups"
+                        (createGroupPermissionEvent)="groupManagement($event)" [loading]="permFormLoading">
+                    </app-workflow-permission-form>
+                </ng-container>
+            </div>
+            <div *ngSwitchCase="'advanced'" class="padded">
+                <app-workflow-admin [project]="project" [workflow]="detailedWorkflow" [editMode]="editMode">
+                </app-workflow-admin>
+            </div>
+            <div *ngSwitchCase="'usage'" class="padded">
+                <app-usage [project]="project" [pipelines]="detailedWorkflow.usage.pipelines"
+                    [applications]="detailedWorkflow.usage.applications"
+                    [environments]="detailedWorkflow.usage.environments">
+                </app-usage>
+            </div>
+            <div *ngSwitchCase="'audits'" class="padded">
+                <app-audit-list [audits]="detailedWorkflow.audits" [loading]="loading" (rollback)="rollback($event)"
+                    [canRollback]="detailedWorkflow.permissions.writable"></app-audit-list>
+            </div>
+        </app-scrollview>
+    </div>
+</ng-template>
+<ng-template #loadingPart>
+    <nz-spin nzTip="Loading..."></nz-spin>
+</ng-template>
+
+<ng-template #warnPermission>
+    Following groups that are not from organization "{{detailedWorkflow.organization}}" can read the workflow:
+    <span *ngFor="let gp of groupsOutsideOrganization;let i = index">{{gp.group.name}}
+        ({{gp.group.organization}}){{ i < groupsOutsideOrganization.length - 1 ? ', ' : '' }}
+    </span>
+</ng-template>

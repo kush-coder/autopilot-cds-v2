@@ -1,0 +1,67 @@
+name: Create a simple workflow (04SCWorkflowRunWorkerCmd) that use all  worker command and run it
+testcases:
+- name: assert filepath, your current directory must be at the root of this project
+  steps:
+  - script: '[ -f ./fixtures/04SCWorkflowRunWorkerCmd/pipeline.yml ]'
+  - script: '[ -f ./fixtures/04SCWorkflowRunWorkerCmd/application.yml ]'
+  - script: '[ -f ./fixtures/04SCWorkflowRunWorkerCmd/workflow.yml ]'
+
+- name: prepare test
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project remove --force 04SCWORKFLOWRUNWORKERCMD
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group remove --force 04scworkflowrunworkercmd
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project add 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd
+
+- name: import pipeline and workflow
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} pipeline import --force 04SCWORKFLOWRUNWORKERCMD ./fixtures/04SCWorkflowRunWorkerCmd/pipeline.yml
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} application import --force 04SCWORKFLOWRUNWORKERCMD ./fixtures/04SCWorkflowRunWorkerCmd/application.yml
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} application variable add 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-APPLICATION password password mysuperpassword
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow import --force 04SCWORKFLOWRUNWORKERCMD ./fixtures/04SCWorkflowRunWorkerCmd/workflow.yml
+
+- name: run workflow
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow run 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW
+    assertions:
+    - result.code ShouldEqual 0
+    - "result.systemout ShouldContainSubstring Workflow 04SCWorkflowRunWorkerCmd-WORKFLOW #1 has been launched"
+
+- name: check workflow
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow status 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW 1 --format json
+    retry: 200
+    delay: 1
+    assertions:
+    - result.code ShouldEqual 0
+    - result.systemoutjson.last_execution ShouldNotBeEmpty
+    - result.systemoutjson.start ShouldNotBeEmpty
+    - result.systemoutjson.num ShouldContainSubstring 1
+    - result.systemoutjson.status ShouldEqual Success
+    - result.systemoutjson.tags ShouldContainSubstring triggered_by
+    - result.systemoutjson.tags ShouldContainSubstring tag1
+    - result.systemoutjson.tags ShouldContainSubstring tag2
+
+- name: check result
+  steps:
+    - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow logs download 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW 1 --pattern CHECKSECRET; grep "secret variable cds.app.password is used in file" *.log
+      retry: 100
+      delay: 1
+    - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow logs download 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW 1 --pattern TMPL; grep "this a a line in the file, with a CDS variable 1" *.log
+      retry: 100
+      delay: 1
+    # The job checks the installed files itself: a key printed in the logs is blurred, as it should be
+    - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow logs download 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW 1 --pattern KEY; grep "KEY INSTALLED IN WORKSPACE" *.log && grep "KEY INSTALLED IN TMP" *.log
+      retry: 100
+      delay: 1
+    - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow logs download 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW 1 --pattern ARTIFACTLIST; grep "\"name\":\"myFileUploaded\"" *.log
+      retry: 100
+      delay: 1
+    - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow logs download 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW 1 --pattern DOWNLOAD; grep "Je suis un artifact" *.log
+      retry: 100
+      delay: 1
+    - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow logs download 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW 1 --pattern EXPORTECHO; grep "Export value bar" *.log
+      retry: 100
+      delay: 1
+    - script: {{.cdsctl}} -f {{.cdsctl.config}} workflow logs download 04SCWORKFLOWRUNWORKERCMD 04SCWorkflowRunWorkerCmd-WORKFLOW 1 --pattern CACHEPULL; grep "cache push file content" *.log
+      retry: 100
+      delay: 1

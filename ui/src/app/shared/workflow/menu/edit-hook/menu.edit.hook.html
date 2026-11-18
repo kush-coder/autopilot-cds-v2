@@ -1,0 +1,34 @@
+<ul>
+  @if (hook.hook_model_name !== 'Workflow') {
+    <li>
+      <a appClickable [class.disabled]="isRun && (!hookEventUUID || hookEventUUID !== hook.uuid)" (click)="sendEvent('logs')">Display logs</a>
+    </li>
+  }
+  @if (hook.hook_model_name === 'Workflow' && hookEvent?.parent_workflow?.key) {
+    <li >
+      <a [routerLink]="['/project', hookEvent.parent_workflow.key, 'workflow', hookEvent.parent_workflow.name, 'run', hookEvent.parent_workflow.run]">Display parent workflow run</a>
+    </li>
+  }
+  <hr>
+    <li>
+      <a appClickable (click)="sendEvent('edit')">
+        @if (readonly) {
+          <span>Show context configuration</span>
+        }
+        @if (!readonly) {
+          <span>Edit the context</span>
+        }
+      </a>
+    </li>
+    <hr>
+      <li>
+        @if (!readonly) {
+          <a appClickable nz-popconfirm nzPopconfirmTitle="Are you sure you want to delete this hook ?" (nzOnConfirm)="sendEvent('delete')">Delete</a>
+        }
+        @if (readonly) {
+          <span><a disabled>Delete</a></span>
+        }
+      </li>
+    </ul>
+
+

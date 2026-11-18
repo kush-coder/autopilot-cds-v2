@@ -1,0 +1,24 @@
+<div>
+  @switch (mode) {
+    @case ('unified') {
+      <nz-row>
+        <nz-col [nzSpan]="24">
+          <codemirror [(ngModel)]="contentLeft" [config]="codeMirrorConfig" (change)="onCodeLeftChange()"
+          aria-label="Diff content" #codeLeft></codemirror>
+        </nz-col>
+      </nz-row>
+    }
+    @case ('split') {
+      <nz-row>
+        <nz-col [nzSpan]="12">
+          <codemirror [(ngModel)]="contentLeft" [config]="codeMirrorConfig" (change)="onCodeLeftChange()"
+          aria-label="Original content" #codeLeft></codemirror>
+        </nz-col>
+        <nz-col [nzSpan]="12">
+          <codemirror [(ngModel)]="contentRight" [config]="codeMirrorConfig" (change)="onCodeRightChange()"
+          aria-label="Modified content" #codeRight></codemirror>
+        </nz-col>
+      </nz-row>
+    }
+  }
+</div>

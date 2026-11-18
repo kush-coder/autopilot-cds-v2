@@ -1,0 +1,36 @@
+import { ChangeDetectionStrategy, Component, EventEmitter, inject, Input, Output } from '@angular/core';
+import { GroupPermission } from 'app/model/group.model';
+import { PermissionEvent } from 'app/shared/permission/permission.event.model';
+import { PermissionService } from 'app/shared/permission/permission.service';
+
+@Component({
+    standalone: false,
+    selector: 'app-workflow-permission-form',
+    templateUrl: './workflow-permission.form.html',
+    styleUrls: ['./workflow-permission.form.scss'],
+    changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class WorkflowPermissionFormComponent {
+    permissionList: Array<{name: string, value: number}>;
+    newGroupPermission: GroupPermission = new GroupPermission();
+
+    @Input() loading = false;
+    @Input() groups: Array<GroupPermission> = [];
+
+    // submit (green)/button (blue)
+    @Input() buttonType = 'submit';
+
+    @Output() createGroupPermissionEvent = new EventEmitter<PermissionEvent>();
+
+    private _permService = inject(PermissionService);
+
+    constructor() {
+        this.permissionList = this._permService.getPermissions();
+    }
+
+    create(): void {
+        this.newGroupPermission.permission = Number(this.newGroupPermission.permission); // select return a string
+        let gpEvent: PermissionEvent = new PermissionEvent('add', this.newGroupPermission);
+        this.createGroupPermissionEvent.emit(gpEvent);
+    }
+}

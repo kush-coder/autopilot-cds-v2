@@ -1,0 +1,24 @@
+name: Smoke tests
+vars:
+  ui.url: 'http://localhost:8080'
+  hatchery.url: 'http://localhost:8086'
+  hooks.url: 'http://localhost:8083'
+
+testcases:
+- name: Check UI, Hatchery are UP and RUNNING
+  steps:
+  - type: http
+    method: GET
+    url: '{{.ui.url}}'
+    retry: 100
+    delay: 1
+  - type: http
+    method: GET
+    url: '{{.hatchery.url}}/mon/status'
+    retry: 100
+    delay: 1
+  - type: http
+    method: GET
+    url: '{{.hooks.url}}/mon/status'
+    retry: 100
+    delay: 1

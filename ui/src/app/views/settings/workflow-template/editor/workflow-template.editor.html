@@ -1,0 +1,10 @@
+<codemirror #code class="code" [ngModel]="value" [config]="codeMirrorConfig" (change)="valueChange($event)">
+</codemirror>
+@if (editable && removable) {
+  <button nz-button nzDanger nzType="primary" class="codeButton" aria-label="Remove this element" (click)="clickRemove()">
+    <i nz-icon nzType="delete" nzTheme="outline" aria-hidden="true"></i>
+  </button>
+}
+@if (this.error) {
+  <nz-alert nzType="error" [nzMessage]="this.error.message"></nz-alert>
+}

@@ -1,0 +1,89 @@
+@use '../../../common' as common;
+nz-row {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+th.sortable:after {
+    font-family: Icons;
+    content: '\f0dc';
+}
+
+th.ascending:after {
+    font-family: Icons;
+    content: '\f0de';
+}
+
+th.descending:after {
+    font-family: Icons;
+    content: '\f0dd';
+}
+
+.table {
+    tbody tr td {
+        overflow: hidden;
+    }
+}
+
+pre {
+  word-wrap: break-word;
+}
+
+.text-labels {
+    .label:first-child {
+        margin-left: 5px;
+    }
+}
+
+img {
+    width: 48px;
+    height: 48px;
+    float: left;
+}
+
+.vcenter {
+    display: flex;
+    align-items: center;
+}
+
+.author {
+    padding-top: 5px;
+    padding-left: 10px;
+}
+
+pre {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: 'Lato', 'Helvetica Neue', Arial, Helvetica, sans-serif;
+}
+
+.green {
+  color: common.$cds_color_green;
+}
+.red {
+  color: common.$cds_color_red;
+}
+.blue {
+  color: common.$cds_color_teal;
+}
+.grey {
+  color: common.$cds_trigger_color;
+}
+
+.orange {
+  color: common.$cds_color_orange;
+}
+
+td {
+  i {
+    font-size: 1.3em;
+  }
+  button {
+    i {
+      font-size: 1em;
+    }
+  }
+
+  .rightAlign {
+    float: right;
+  }
+}

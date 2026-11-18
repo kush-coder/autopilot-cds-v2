@@ -1,0 +1,102 @@
+@if (edit) {
+  @switch (type) {
+    @case ('number') {
+      <input nz-input type="number" aria-label="Parameter value" [(ngModel)]="editableValue" (change)="valueChanged()" (keydown)="sendValueChanged()"
+        name="value">
+    }
+    @case ('text') {
+      <codemirror [(ngModel)]="editableValue" [config]="codeMirrorConfig" (change)="changeCodeMirror()" #codeMirror
+      (keydown)="sendValueChanged()" aria-label="Parameter value editor"></codemirror>
+    }
+    @case ('boolean') {
+      <label nz-checkbox [(ngModel)]="editableValue" (ngModelChange)="valueChanged();sendValueChanged()" name="value"></label>
+    }
+    @case ('ssh-key') {
+      @if (keys && keys.ssh && (!editableValue || keyExist(editableValue.toString()))) {
+        <nz-select nzShowSearch name="sshname" [(ngModel)]="editableValue"  (ngModelChange)="valueChanged();sendValueChanged()" >
+          @for (t of keys.ssh; track t) {
+            <nz-option [nzLabel]="t.name" [nzValue]="t.name"></nz-option>
+          }
+        </nz-select>
+      }
+      @if (!keys || (editableValue && keys && keys.ssh && !keyExist(editableValue.toString()))) {
+        <input nz-input type="text" aria-label="Parameter value" [(ngModel)]="editableValue" (change)="valueChanged()" (keydown)="sendValueChanged()"
+          name="value">
+      }
+    }
+    @case ('pgp-key') {
+      @if (keys) {
+        <nz-select nzShowSearch name="gpgname" [(ngModel)]="editableValue"  (ngModelChange)="valueChanged();sendValueChanged()">
+          @for (t of keys.pgp; track t) {
+            <nz-option [nzLabel]="t.name" [nzValue]="t.name"></nz-option>
+          }
+        </nz-select>
+      }
+    }
+    @case ('list') {
+      @if (editList) {
+        <input nz-input type="text" aria-label="Parameter value" [(ngModel)]="editableValue" (change)="valueChanged()" (keydown)="sendValueChanged()"
+          name="value" placeholder="value1;value2;value3">
+      }
+      @if (!editList && editableValue && list) {
+        <nz-select nzShowSearch name="listvalue" [(ngModel)]="editableValue" (ngModelChange)="valueChanged();sendValueChanged()">
+          @if (refValue) {
+            @for (v of refValue; track v) {
+              <nz-option [nzValue]="v" [nzLabel]="v"></nz-option>
+            }
+          }
+          @if (!refValue) {
+            @for (v of list; track v) {
+              <nz-option [nzValue]="v" [nzLabel]="v"></nz-option>
+            }
+          }
+        </nz-select>
+      }
+    }
+    @case ('repository') {
+      <nz-select nzShowSearch [(ngModel)]="selectedRepoManager.name" (ngModelChange)="updateRepoManager($event)">
+        @for (r of repositoriesManager; track r) {
+          <nz-option [nzValue]="r.name" [nzLabel]="r.name"></nz-option>
+        }
+      </nz-select>
+      @if (selectedRepoManager && selectedRepoManager.name !== 'Git Url') {
+        <nz-select [(ngModel)]="selectedRepo"
+          [disabled]="loadingRepos"
+          (ngModelChange)="valueRepoChanged($event)">
+          @for (r of repositories; track r) {
+            <nz-option [nzLabel]="r.fullname" [nzValue]="r.fullname"></nz-option>
+          }
+        </nz-select>
+      }
+      @if (selectedRepoManager && selectedRepoManager.name === 'Git Url') {
+        <input nz-input type="text" aria-label="Parameter value"
+          [(ngModel)]="editableValue" (change)="valueChanged()" (keydown)="sendValueChanged()" name="value"
+          placeholder="{{'parameter_git_url' | translate }}">
+      }
+    }
+    @default {
+      <div>
+        <input nz-input aria-label="Parameter value" [nzAutocomplete]="auto" type="text" [(ngModel)]="editableValue" (change)="valueChanged()"
+          (keydown)="sendValueChanged()" name="value" (ngModelChange)="onInput($event)">
+        <nz-autocomplete nzBackfill #auto>
+          @for (option of suggestFiltered; track option) {
+            <nz-auto-option [nzValue]="option">{{ option }}</nz-auto-option>
+          }
+        </nz-autocomplete>
+      </div>
+    }
+  }
+}
+@if (!edit) {
+  @switch (type) {
+    @case ('text') {
+      <textarea nz-input aria-label="Parameter value" readonly rows="{{_sharedService.getTextAreaheight(editableValue.toString())}}">{{editableValue}}</textarea>
+    }
+    @case ('boolean') {
+      <label nz-checkbox [(ngModel)]="editableValue" name="value" [nzDisabled]="true"></label>
+    }
+    @default {
+      <input nz-input aria-label="Parameter value" readonly [ngModel]="editableValue">
+    }
+  }
+}

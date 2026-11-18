@@ -1,0 +1,223 @@
+@use "../../../../../common" as common;
+
+:host {
+    height: 100%;
+    width: 255px;
+    display: flex;
+    flex-direction: column;
+
+    .loader {
+        margin-top: 40px;
+    }
+
+    .selection {
+        margin: 6px 0 6px 4px;
+        width: calc(100% - 4px);
+    }
+
+    .runs {
+        color: common.$polar_grey_1;
+        flex: 1;
+        overflow: hidden;
+
+        .night & {
+            color: common.$darkTheme_grey_5;
+        }
+
+        &:hover {
+            overflow-y: auto;
+        }
+
+        .empty {
+            padding: 20px;
+            text-align: center;
+        }
+
+        .item {
+            width: 240px;
+            height: 60px;
+            margin: 0 0 6px 4px;
+            padding: 0;
+            border-left: 4px solid grey;
+            background-color: common.$polar_grey_5;
+            display: flex;
+            flex-direction: column;
+
+            .content {
+                flex: 1;
+                display: flex;
+                flex-direction: row;
+                padding: 3px 5px 0 5px;
+
+                .info {
+                    overflow: hidden;
+                    flex: 1;
+                    display: flex;
+                    flex-direction: column;
+
+                    .number-wrapper {
+                        display: flex;
+                        flex-direction: row;
+
+                        &:hover {
+                            a {
+                                display: block;
+                            }
+                        }
+
+                        a {
+                            display: none;
+                            text-decoration: none;
+                            color: common.$polar_grey_1;
+                            .night & {
+                                color: common.$darkTheme_grey_5;
+                            }
+
+                            &:hover {
+                                color: common.$polar_grey_3;
+                                .night & {
+                                    color: common.$polar_grey_5;
+                                }
+                            }
+                        }
+
+                        .number {
+                            flex: 1;
+                            white-space: nowrap;
+                            overflow: hidden;
+                            text-overflow: ellipsis;
+
+                            .hash {
+                                font-size: 1.2em;
+                                line-height: 1em;
+                                color: common.$polar_grey_3;
+                                margin-right: 1px;
+                            }
+
+                            .count {
+                                font-size: 1.3em;
+                                line-height: 1em;
+
+                                .night & {
+                                    &.success {
+                                        color: common.$darkTheme_green;
+                                    }
+                                    &.running {
+                                        color: common.$darkTheme_blue;
+                                    }
+                                    &.fail {
+                                        color: common.$darkTheme_red;
+                                    }
+                                    &.waiting {
+                                        color: common.$darkTheme_blue;
+                                    }
+                                }
+
+                                &.success {
+                                    color: common.$cds_color_green;
+                                }
+                                &.running {
+                                    color: common.$cds_color_teal;
+                                }
+                                &.fail {
+                                    color: common.$cds_color_red;
+                                }
+                                &.waiting {
+                                    color: common.$cds_color_teal;
+                                }
+                            }
+                        }
+                    }
+
+                    .line {
+                        font-size: 0.8em;
+                        line-height: 0.9em;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        padding: 5px 0;
+                    }
+                }
+
+                app-status-icon {
+                    margin-top: 2px;
+                }
+            }
+
+            .foot {
+                display: flex;
+                flex-direction: row;
+                font-size: 0.8em;
+                line-height: 0.9em;
+                padding: 0px 5px 3px 5px;
+
+                .duration {
+                    flex: 1;
+                }
+            }
+
+            &.active {
+                background-color: common.$cds_color_light_grey;
+            }
+
+            &:focus {
+                outline: none;
+            }
+
+            &:hover {
+                background-color: common.$cds_color_light_grey;
+            }
+
+            &.success {
+                border-color: common.$cds_color_green;
+            }
+
+            &.running {
+                border-color: common.$cds_color_teal;
+            }
+
+            &.fail {
+                border-color: common.$cds_color_red;
+            }
+
+            &.waiting {
+                border-color: common.$cds_color_teal;
+            }
+
+            .night & {
+                background-color: common.$darkTheme_grey_1;
+
+                &.active {
+                    background-color: common.$darkTheme_grey_0;
+                }
+
+                &:hover {
+                    background-color: common.$darkTheme_grey_0;
+                }
+
+                &.success {
+                    border-color: common.$darkTheme_green;
+                }
+
+                &.running {
+                    border-color: common.$darkTheme_blue;
+                }
+
+                &.fail {
+                    border-color: common.$darkTheme_red;
+                }
+
+                &.waiting {
+                    border-color: common.$darkTheme_blue;
+                }
+            }
+        }
+    }
+  nz-select {
+    padding: 5px 10px 5px 5px;
+  }
+}
+
+nz-spin {
+  margin-top: 50px;
+}

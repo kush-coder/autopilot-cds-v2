@@ -1,0 +1,154 @@
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, EventEmitter, inject, Input, OnChanges, OnDestroy, OnInit, Output, SimpleChanges, TemplateRef } from '@angular/core';
+import { ActivatedRoute, Router } from '@angular/router';
+import { AutoUnsubscribe } from 'app/shared/decorator/autoUnsubscribe';
+import { Subscription } from 'rxjs';
+import { ThemeType } from '@ant-design/icons-angular';
+
+export class Tab {
+    title: string;
+    icon: string;
+    iconTheme: ThemeType;
+    iconClassColor: string;
+    key: string;
+    default: boolean;
+    template: TemplateRef<any>;
+    warningText: string;
+    warningTemplate: TemplateRef<any>;
+    disabled: boolean;
+    link: string[];
+}
+
+@Component({
+    standalone: false,
+    selector: 'app-tabs',
+    templateUrl: './tabs.html',
+    styleUrls: ['./tabs.scss'],
+    changeDetection: ChangeDetectionStrategy.OnPush
+})
+@AutoUnsubscribe()
+export class TabsComponent implements OnInit, OnChanges, OnDestroy {
+    @Input() tabs: Array<Tab>;
+    @Input() disableNavigation: boolean;
+
+    @Output() onSelect = new EventEmitter<Tab>();
+
+    selected: Tab;
+    queryParamsSub: Subscription;
+
+    private _route = inject(ActivatedRoute);
+    private _router = inject(Router);
+    private _cd = inject(ChangeDetectorRef);
+
+    ngOnDestroy(): void { } // Should be set to use @AutoUnsubscribe with AOT
+
+    ngOnInit() {
+        this.select(this.tabs.find(t => t.default));
+        this.queryParamsSub = this._route.queryParams.subscribe(params => {
+            if (!this.disableNavigation) {
+                if (params['tab']) {
+                    this.select(this.tabs.find(t => t.key === params['tab']));
+                } else {
+                    this.select(this.getDefaultTab());
+                }
+            }
+        });
+    }
+
+    ngOnChanges(changes: SimpleChanges): void {
+        if (this.selected && !this.tabs.find(t => t.key === this.selected.key)) {
+            delete this.selected;
+        }
+
+        if (this.disableNavigation) {
+            const defaultChanged = changes.tabs && (changes.tabs.previousValue ?? []).find(t => t.default)?.key !== (changes.tabs.currentValue ?? []).find(t => t.default)?.key;
+            if (!this.selected || defaultChanged) {
+                this.select(this.getDefaultTab());
+                this._cd.markForCheck();
+            }
+            return;
+        }
+
+        if (this.selected && this._route.snapshot.queryParams['tab'] && this.selected.key !== this._route.snapshot.queryParams['tab']) {
+            delete this.selected;
+        }
+
+        if (!this.selected) {
+            const tab = this.tabs.find(t => t.key === this._route.snapshot.queryParams['tab']);
+            if (tab) {
+                this.select(tab);
+            } else {
+                this.select(this.getDefaultTab());
+            }
+        }
+
+        this._cd.markForCheck();
+    }
+
+    getDefaultTab(): Tab {
+        let defaultTab = this.tabs.find(t => t.default);
+        if (defaultTab) {
+            return defaultTab;
+        }
+        return this.tabs[0];
+    }
+
+    keyActivate(event: Event, tab: Tab) {
+        if (event.target !== event.currentTarget) {
+            return;
+        }
+        event.preventDefault();
+        this.clickSelect(tab);
+    }
+
+    keyNavigate(event: Event, direction: number) {
+        if (event.target !== event.currentTarget) {
+            return;
+        }
+        event.preventDefault();
+        const enabledTabs = this.tabs.filter(t => !t.disabled);
+        if (enabledTabs.length === 0) {
+            return;
+        }
+        const current = this.selected ?? this.getDefaultTab();
+        let idx = enabledTabs.findIndex(t => current && t.key === current.key);
+        if (idx === -1) {
+            idx = 0;
+        }
+        const next = enabledTabs[(idx + direction + enabledTabs.length) % enabledTabs.length];
+        this.clickSelect(next);
+        const items = (event.currentTarget as HTMLElement).parentElement?.querySelectorAll('li[role="tab"]');
+        const nextIndex = this.tabs.indexOf(next);
+        if (items && items[nextIndex]) {
+            (items[nextIndex] as HTMLElement).focus();
+        }
+    }
+
+    clickSelect(tab: Tab) {
+        if (this.selected && this.selected.key === tab.key) {
+            return;
+        }
+        if (tab.disabled) {
+            return;
+        }
+        if (tab.link?.length > 0) {
+            this._router.navigate(tab.link);
+            return;
+        }
+        if (!this.disableNavigation) {
+            this._router.navigate([], {
+                relativeTo: this._route,
+                queryParams: { tab: tab.key },
+                queryParamsHandling: 'merge'
+            });
+        } else {
+            this.select(this.tabs.find(t => t.key === tab.key));
+        }
+    }
+
+    select(tab: Tab) {
+        if (tab) {
+            this.selected = tab;
+            this.onSelect.emit(this.selected);
+        }
+    }
+}

@@ -1,0 +1,43 @@
+<nz-table [nzData]="keys" [nzNoResult]="nokeys" #keylist>
+  <thead>
+    <tr>
+      <th nzWidth="50px">Key name</th>
+      <th nzWidth="50px">Key type</th>
+      <th nzWidth="400px">Public key</th>
+      @if (edit) {
+        <th nzWidth="25px"></th>
+      }
+    </tr>
+  </thead>
+  @for (k of keylist.data; track k) {
+    <tbody>
+      <tr>
+        <td>
+          {{ k.name }} @if (k.disabled) {
+          <span class="disabledKey">(disabled)</span>
+        }
+      </td>
+      <td>
+        {{ k.type }}
+      </td>
+      <td nzBreakWord>
+        @if (k.type === 'ssh') {
+          <input nz-input readonly aria-label="Public key" [ngModel]="k.public">
+        }
+        @if (k.type === 'pgp') {
+          <textarea nz-input aria-label="Public key" [ngModel]="k.public" readonly rows="29"></textarea>
+        }
+      </td>
+      @if (edit) {
+        <td>
+          <button nz-button nzDanger nzType="primary" [nzLoading]="loading" nz-popconfirm nzPopconfirmTitle="Are you sure you want to delete this key ?"
+          (nzOnConfirm)="deleteKey(k)">Delete</button>
+        </td>
+      }
+    </tr>
+  </tbody>
+}
+</nz-table>
+<ng-template #nokeys>
+  <nz-alert nzType="info" nzMessage="There is no key"></nz-alert>
+</ng-template>

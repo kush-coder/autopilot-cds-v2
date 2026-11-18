@@ -1,0 +1,38 @@
+version: v1.0
+name: push-artifact
+stages:
+- Stage 1
+- Stage 2
+- Stage 3
+- Stage 4
+jobs:
+- job: Push-artifact
+  stage: Stage 1
+  steps:
+  - script:
+    - echo "hello world" > test.txt
+    - echo "changes" > test.changes
+  - artifactUpload:
+      path: test.*
+      tag: '{{.cds.version}}'
+- job: Release-to-staging
+  stage: Stage 2
+  steps:
+  - promote:
+      artifacts: .*.txt
+      srcMaturity: snapshot
+      destMaturity: staging
+- job: Release-to-rc
+  stage: Stage 3
+  steps:
+  - release:
+      artifacts: .*.txt
+      srcMaturity: staging
+      destMaturity: rc
+- job: Release-to-release
+  stage: Stage 4
+  steps:
+  - release:
+      artifacts: .*.txt
+      srcMaturity: rc
+      destMaturity: release

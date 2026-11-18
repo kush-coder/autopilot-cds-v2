@@ -1,0 +1,48 @@
+.codebar {
+    position: fixed;
+    top: 0;
+    right: 0;
+    left: auto;
+    z-index: unset;
+    height: 87%;
+    width: 0;
+
+    &.visible {
+        width: 50%;
+    }
+    margin-top: 100px !important;
+    overflow-y: auto;
+
+    .transparent {
+        background-color: transparent;
+    }
+
+    .fullheight {
+      height: 87%;
+      width: 100%;
+    }
+
+    .mt5 {
+        margin-top: 5px;
+    }
+
+  .bottomBtnsWrapper {
+    position: absolute;
+    right: 0;
+    width: 440px;
+    padding-top: 20px;
+    padding-bottom: 20px;
+
+    nz-row {
+      padding: 0 20px;
+      nz-col {
+        padding-top: 5px;
+        padding-bottom: 5px;
+      }
+    }
+  }
+}
+
+nz-spin {
+  margin-top: 30px;
+}

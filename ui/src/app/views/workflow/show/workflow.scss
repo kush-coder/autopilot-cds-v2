@@ -1,0 +1,48 @@
+@use '../../../../common' as common;
+.workflowShow {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+
+  .workflowShowGraph {
+    width: 100%;
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+
+    .center {
+      text-align: center;
+    }
+    .alignRight {
+      text-align: right;
+    }
+
+    app-workflow-graph {
+      margin-top: 10px;
+      flex: 1;
+    }
+
+    .savePreview {
+      margin-left: 10px;
+    }
+
+    .orange {
+      color: orange;
+    }
+  }
+
+  .ascodeButton {
+    position: absolute;
+    right: 15px;
+    margin-top: 7px;
+  }
+}
+
+nz-spin {
+  margin-top: 30px;
+}
+
+nz-alert {
+  margin-bottom: 10px;
+}

@@ -1,0 +1,279 @@
+@use '../../../../common' as common;
+
+:host {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  flex-direction: row;
+  height: 100%;
+}
+
+::ng-deep {
+  .ant-select-item-empty {
+    display: none !important;
+  }
+}
+
+.save-search-form {
+  nz-form-item {
+    margin: 0;
+  }
+
+  [nz-input] {
+    width: 250px;
+  }
+}
+
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 15px 20px;
+  overflow: hidden;
+  height: 100%;
+
+  .header {
+    display: flex;
+    flex-direction: row;
+
+    [nz-form] {
+      margin-left: 10px;
+      flex: 1;
+      display: flex;
+      flex-direction: row;
+
+      nz-form-item {
+        margin: 0;
+      }
+
+      nz-form-item:first-child {
+        flex: 1;
+      }
+
+      nz-form-item:not(last-child) {
+        margin-right: 10px;
+      }
+    }
+  }
+
+  .run-list {
+    margin: 20px 0;
+    flex: 1;
+    overflow-y: auto;
+
+    nz-list-item {
+      &.append {
+        background-color: #f5f5f5;
+
+        :host-context(.night) & {
+          background-color: rgba(255, 255, 255, 0.08);
+        }
+      }
+    }
+
+    .run-line {
+      cursor: pointer;
+
+      &:hover {
+        background-color: rgba(79, 163, 227, 0.06);
+      }
+    }
+
+    // The magnifier closes the title, right after the ref and the scope, so it takes their style
+    // rather than the one of the name. The hover has to be restated, this wins over app-searchable.
+    nz-list-item-meta ::ng-deep .ant-list-item-meta-title .search {
+      font-weight: normal;
+      font-size: 12px;
+      color: #979797;
+
+      &:hover {
+        color: #177ddc;
+      }
+    }
+
+    nz-list-item-meta {
+      ::ng-deep {
+        .ant-list-item-meta-content {
+          width: unset !important;
+        }
+      }
+
+      [nzCopyable] {
+        color: inherit;
+
+        ::ng-deep {
+          .ant-typography-copy {
+            color: inherit;
+            margin: 0 2px 0 0;
+          }
+
+          &:hover {
+            color: #177ddc;
+          }
+        }
+      }
+    }
+
+    .dotted {
+      color: inherit;
+      text-decoration: underline dotted;
+      white-space: nowrap;
+
+      &:hover {
+        color: #177ddc;
+      }
+    }
+
+    .run-avatar {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      width: 25px;
+      height: 48px;
+
+      [nz-icon] {
+        font-size: 25px;
+
+        &.success {
+          color: common.$cds_color_green;
+        }
+
+        &.fail {
+          color: common.$cds_color_red;
+        }
+
+        &.cancelled {
+          color: common.$polar_grey_2;
+        }
+
+        &.building {
+          color: common.$cds_color_teal;
+        }
+
+        &.blocked {
+          color: common.$cds_color_teal;
+        }
+
+        &.skipped {
+          color: common.$polar_grey_2;
+        }
+
+        &.stopped {
+          font-size: 21px;
+          border: 2px solid common.$cds_color_red;
+          border-radius: 12px;
+          color: common.$cds_color_red;
+        }
+      }
+    }
+
+    .annotations {
+      flex: 0.75;
+      display: flex;
+      flex-direction: row-reverse;
+      flex-wrap: wrap;
+      align-items: center;
+      margin: 0 10px;
+      overflow: hidden;
+
+      &>* {
+        margin: 4px;
+      }
+    }
+
+    [nz-list-item-actions] {
+      text-align: right;
+      margin: 0 0 0 10px;
+      min-width: 120px;
+    }
+
+    // Way out of an empty result set: the message and the workflows it announces, as one block.
+    ::ng-deep .ant-list-empty-text {
+      color: inherit;
+    }
+
+    .no-run {
+      max-width: 780px;
+      margin: 40px auto;
+      text-align: left;
+
+      .message {
+        text-align: center;
+        margin-bottom: 8px;
+
+        h3 {
+          font-size: 18px;
+          font-weight: 500;
+          color: inherit;
+          margin-bottom: 8px;
+        }
+
+        // Spread the sentence evenly over its lines rather than leaving a word alone on the last.
+        p {
+          margin-bottom: 20px;
+          text-wrap: balance;
+        }
+      }
+
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      li {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 0;
+
+        // No line between the message and the first workflow, they belong together.
+        +li {
+          border-top: 1px solid #f0f0f0;
+
+          :host-context(.night) & {
+            border-color: common.$darkTheme_grey_3;
+          }
+        }
+
+        .workflow {
+          flex: 1;
+          min-width: 0;
+          color: inherit;
+        }
+
+        .actions {
+          flex: 0 0 auto;
+          display: flex;
+          flex-direction: row;
+          gap: 8px;
+        }
+      }
+    }
+  }
+
+  .footer {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+
+    nz-pagination {
+      margin-left: auto;
+    }
+
+    nz-select {
+      margin-left: 4px;
+
+      ::ng-deep {
+        .ant-select-selector {
+          padding: unset;
+        }
+
+        .ant-select-arrow {
+          right: 4px;
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+@use '../../../../common' as common;
+
+#AddApplication {
+  display: flex;
+  flex-direction: column;
+  align-content: stretch;
+  height: 100%;
+
+  form {
+    padding-top: 20px;
+  }
+
+  h2 {
+    text-align: center;
+  }
+
+  nz-select {
+    width: 100%;
+  }
+
+  nz-form-item {
+    margin-top: 24px;
+  }
+
+  .app-icon {
+    height: 5em;
+    width: 5em;
+  }
+
+  button {
+    margin-left: 15px;
+  }
+}

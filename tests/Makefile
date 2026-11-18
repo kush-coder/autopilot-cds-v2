@@ -1,0 +1,90 @@
+define MINIO_CONFIG
+export HOSTNAME=$$(hostname)
+export AWS_DEFAULT_REGION=us-east-1
+export S3_BUCKET=cds-it
+export MINIO_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE
+export MINIO_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+export AWS_ENDPOINT_URL=http://$$(hostname):9000
+endef
+
+MINIO_CONTAINER_ID = $(shell docker ps -f name=minio1 -q)
+FORGEJO_CONTAINER_ID = $(shell docker ps -f name=forgejo -q)
+FORGEJO_VERSION = 14
+
+UNAME_S := $(shell uname -s| tr A-Z a-z)
+VERSION := $(if ${CDS_VERSION},${CDS_VERSION},snapshot)
+
+FORGEJO_USER := $(if ${FORGEJO_USER},${FORGEJO_USER},gituser)
+FORGEJO_USER_FORK := $(if ${FORGEJO_USER_FORK},${FORGEJO_USER_FORK},gituserfork)
+FORGEJO_PASSWORD := $(if ${FORGEJO_PASSWORD},${FORGEJO_PASSWORD},gitpassword)
+FORGEJO_DOMAIN := $(if ${FORGEJO_DOMAIN},${FORGEJO_DOMAIN},localhost)
+FORGEJO_SSH_PORT := $(if ${FORGEJO_SSH_PORT},${FORGEJO_SSH_PORT},2222)
+
+COVER_FILES = $(shell find . -name "*.coverprofile")
+
+clean:
+	@rm -f $(MINIO_CONTAINER_ID) $(MINIO_RC)
+	@docker kill minio1 || true && docker rm minio1 || true
+	@docker kill forgejo || true && docker rm forgejo || true
+
+minio_start: $(MINIO_RC)
+	@if [ -z "$(MINIO_CONTAINER_ID)" ]; then \
+		docker rm minio1 >/dev/null 2>&1 || true; \
+		echo "starting minio container"; \
+		docker run -d -p 9000:9000 --name minio1 \
+				-e "MINIO_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE" \
+				-e "MINIO_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" minio/minio server /data; \
+	fi; \
+	$(info # Here are the minio configuration variables)
+	$(info $(MINIO_CONFIG))
+
+minio_reset_bucket:
+	@docker run --rm --link minio1:minio --entrypoint sh minio/mc:RELEASE.2023-10-14T01-57-03Z -c "\
+		microdnf update --nodocs; microdnf install nc --nodocs; \
+		while ! nc -z minio 9000; do echo 'Wait minio to startup...' && sleep 0.1; done; \
+		sleep 5 && \
+		mc config host add myminio http://minio:9000 AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY && \
+		mc rm -r --force myminio/cds-it  || true && \
+		mc mb myminio/cds-it || true \
+		"
+
+forgejo_start:
+	@if [ -z "$(FORGEJO_CONTAINER_ID)" ]; then \
+  		docker run -d -p 3000:3000 -p ${FORGEJO_SSH_PORT}:${FORGEJO_SSH_PORT} -e INSTALL_LOCK=true -e SSH_PORT=${FORGEJO_SSH_PORT} -e FORGEJO__server__SSH_DOMAIN=$(FORGEJO_DOMAIN) -e FORGEJO__webhook__ALLOWED_HOST_LIST=* --name forgejo codeberg.org/forgejo/forgejo:$(FORGEJO_VERSION); \
+  		echo "Starting forgejo..."; \
+  		sleep 5; \
+  		docker exec forgejo su-exec git /app/gitea/forgejo-cli admin user create --username $(FORGEJO_USER) --password $(FORGEJO_PASSWORD) --email $(FORGEJO_USER)@gforgejo.eu --config /data/gitea/conf/app.ini; \
+		docker exec forgejo su-exec git /app/gitea/forgejo-cli admin user create --username $(FORGEJO_USER_FORK) --password $(FORGEJO_PASSWORD) --email $(FORGEJO_USER_FORK)@gitea.eu --must-change-password=false --config /data/gitea/conf/app.ini; \
+		echo "Forgejo started"; \
+  	fi
+
+test-docker-compose:
+	(cd ../tools/smtpmock/ && docker build -t smtpmock . && docker run -d -p 2023:2023 -p 2024:2024 smtpmock) && \
+	docker compose up --no-recreate -d cds-db cds-cache elasticsearch && \
+	sleep 5	&& \
+	docker compose up --no-recreate cds-db-init && \
+	docker compose up --no-recreate cds-migrate && \
+	docker compose up cds-prepare && \
+	CDS_EDIT_CONFIG="api.smtp.disable=false api.smtp.port=2023 api.smtp.host=$(HOSTNAME) " docker compose up cds-edit-config && \
+	docker compose up -d cds-api && \
+	echo "waiting 8s to let cds-api start.." && sleep 8 && \
+	docker ps && \
+	echo "downloading cdsctl from http://localhost:8081/download/cdsctl/$(UNAME_S)/amd64?variant=nokeychain -o cdsctl" && \
+	curl http://localhost:8081/download/cdsctl/$(UNAME_S)/amd64?variant=nokeychain -o cdsctl && \
+	chmod +x cdsctl && \
+	cdsctl version && \
+	export CDSCTL=`realpath ./cdsctl` && \
+	TOKEN_CMD=`docker logs cds-cds-prepare-1|grep TOKEN` && \
+	$$TOKEN_CMD && \
+	./test.sh smoke_api initialization && \
+	CDS_EDIT_CONFIG="hatchery.swarm.commonConfiguration.api.tokenV2=$(cat tmp.hatcheryv2.token)" docker compose up cds-edit-config && \
+	docker compose up -d cds-cdn cds-ui cds-hooks cds-vcs cds-hatchery-local cds-elasticsearch && \
+	echo "waiting 5s to let services start.." && sleep 5 && \
+	./test.sh smoke_services cli;
+
+merge-coverage:
+	@docker run -v `pwd`:/workspace golang:alpine sh -c "\
+			go install github.com/wadey/gocovmerge@latest && \
+			cd /workspace && \
+      gocovmerge $(COVER_FILES) > /workspace/cdsctl.cover.out \
+		"

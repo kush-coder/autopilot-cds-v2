@@ -1,0 +1,125 @@
+@if (loading) {
+  <nz-spin nzSimple nzTip="Loading hook executions" class="center"></nz-spin>
+}
+@if (!loading) {
+  <div>
+    <!-- Not found message -->
+    @if (runNumber && !task) {
+      <nz-alert nzType="info" nzMessage="Hook execution has been deleted"></nz-alert>
+    }
+    @if (executions) {
+      <h3>Hook executions</h3>
+      <nz-select nzShowSearch [(ngModel)]="task" (ngModelChange)="selectTask($event)">
+        @for (e of executions; track e) {
+          <nz-option nzCustomContent [nzValue]="e" nzLabel="{{ 'Workflow run n°' + e.workflow_run }}">
+            <div class="hookItem">
+              <div class="status" [class.done]="e.status === hookStatus.DONE"
+                [class.doing]="e.status === hookStatus.DOING"
+              [class.error]="e.status === hookStatus.FAIL"></div>
+              {{ 'Workflow run n°' + e.workflow_run }}
+              <span class="date">{{' at '}}{{e.timestamp/1000000 | amDateFormat: 'YYYY-MM-DD HH:mm:ss Z' }}</span>
+            </div>
+          </nz-option>
+        }
+      </nz-select>
+    }
+    @if (task) {
+      <form nz-form>
+        <ng-container>
+          <h3>Hook configuration</h3>
+          @if (task.config) {
+            @for (k of task.config | keys; track k) {
+              <nz-form-item>
+                <nz-form-label [nzSpan]="4" nzFor="cds-field-hook-{{k}}">{{k}}</nz-form-label>
+                <nz-form-control [nzSpan]="20">
+                  @if (k !== 'payload') {
+                    <input nz-input type="text" id="cds-field-hook-{{k}}" name="value-{{k}}" [ngModel]="task.config[k].value" [readonly]="true">
+                  }
+                  @if (k === 'payload') {
+                    <codemirror name="value-{{k}}"
+                      aria-label="Hook payload"
+                      [ngModel]="task.config[k].value"
+                      [config]="codeMirrorConfig"
+                      #textareaCodeMirror>
+                    </codemirror>
+                  }
+                </nz-form-control>
+              </nz-form-item>
+            }
+          }
+          @if (!task.config) {
+            <nz-alert nzType="info" nzMessage="No configuration" ></nz-alert>
+          }
+          <h3>Hook's log</h3>
+          @if (task.workflow_run) {
+            <nz-form-item>
+              <nz-form-label [nzSpan]="4" nzFor="cds-field-hook-run">Workflow run</nz-form-label>
+              <nz-form-control [nzSpan]="20">
+                <input nz-input type="text" id="cds-field-hook-run" [value]="task.workflow_run" [readonly]="true" name="run">
+              </nz-form-control>
+            </nz-form-item>
+          }
+          <nz-form-item>
+            <nz-form-label [nzSpan]="4" nzFor="cds-field-hook-status">Status</nz-form-label>
+            <nz-form-control [nzSpan]="20">
+              <nz-input-group [nzSuffix]="suffixIconSearch">
+                <input nz-input type="text" id="cds-field-hook-status" [value]="task.status" name="status" readonly>
+              </nz-input-group>
+              <ng-template #suffixIconSearch>
+                @if (task.status === hookStatus.DONE) {
+                  <span nz-icon nzType="check" nzTheme="outline"
+                  class="green"></span>
+                }
+                @if (task.status === hookStatus.DOING) {
+                  <span nz-icon [nzType]="'loading'"
+                  class="blue"></span>
+                }
+                @if (task.status === hookStatus.FAIL) {
+                  <span nz-icon nzType="close" nzTheme="outline"
+                  class="red"></span>
+                }
+              </ng-template>
+            </nz-form-control>
+          </nz-form-item>
+          <nz-form-item>
+            <nz-form-label [nzSpan]="4" nzFor="cds-field-hook-begin">Begin</nz-form-label>
+            <nz-form-control [nzSpan]="20">
+              <input nz-input type="text" id="cds-field-hook-begin" [value]="(task.timestamp / 1000000) | date:'short'" [readonly]="true" name="begin">
+            </nz-form-control>
+          </nz-form-item>
+          <nz-form-item>
+            <nz-form-label [nzSpan]="4" nzFor="cds-field-hook-end">End</nz-form-label>
+            <nz-form-control [nzSpan]="20">
+              <input nz-input type="text" id="cds-field-hook-end" [value]="(task.processing_timestamp / 1000000) | date:'short'" [readonly]="true" name="end">
+            </nz-form-control>
+          </nz-form-item>
+          @if (task.last_error) {
+            <nz-form-item>
+              <nz-form-label [nzSpan]="4" nzFor="cds-field-hook-error">Error</nz-form-label>
+              <nz-form-control [nzSpan]="20">
+                <input nz-input type="text" id="cds-field-hook-error" [value]="task.last_error" [readonly]="true" name="error">
+              </nz-form-control>
+            </nz-form-item>
+          }
+          @if (body) {
+            <nz-form-item>
+              <nz-form-label [nzSpan]="4">Body</nz-form-label>
+              <nz-form-control [nzSpan]="20">
+                <codemirror name="body"
+                  aria-label="Hook body"
+                  [ngModel]="body"
+                  [config]="codeMirrorConfig"
+                  #code>
+                </codemirror>
+              </nz-form-control>
+            </nz-form-item>
+          }
+        </ng-container>
+      </form>
+    }
+  </div>
+}
+<div *nzModalFooter>
+  <button nz-button (click)="_modal.close()">Close</button>
+</div>
+

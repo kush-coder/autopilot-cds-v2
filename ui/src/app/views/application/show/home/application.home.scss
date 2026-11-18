@@ -1,0 +1,52 @@
+@use '../../../../../common' as common;
+.nzSegment {
+  padding: 20px 20px;
+}
+
+nz-alert {
+  margin-top: 5px;
+  margin-bottom: 10px;
+}
+.dashboard {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+i {
+  &.ribbon-state {
+    width: 5px;
+    &.success {
+      background-color: common.$cds_color_green;
+    }
+    &.running {
+      background-color: common.$cds_color_teal;
+    }
+    &.fail {
+      background-color: common.$cds_color_red;
+    }
+    &.waiting {
+      background-color: common.$cds_color_teal;
+    }
+    &.never {
+      background-color: grey;
+    }
+  }
+}
+
+nz-col {
+  margin-bottom: 15px;
+}
+.entity-card {
+  height: auto;
+}
+.description-item {
+  display: flex;
+
+  .status {
+    width: 5px;
+    background-color: common.$cds_color_green;
+    margin-right: 10px;
+    margin-bottom: 3px;
+  }
+}
+

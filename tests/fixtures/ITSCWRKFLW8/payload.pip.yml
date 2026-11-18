@@ -1,0 +1,13 @@
+version: v1.0
+name: payload
+jobs:
+- job: New Job
+  steps:
+  - name: "Payload"
+    script:
+    - mkdir -p website/sub
+    - env > thefile
+    - ls -l
+    - worker upload --tag={{.cds.version}} thefile
+  requirements:
+    - os-architecture: linux/amd64

@@ -1,0 +1,164 @@
+<div class="header">
+  <div class="menu left">
+    @if (tabs && tabs.length > 1) {
+      @for (tab of tabs; track tab; let i = $index) {
+        <button [class.active]="i === currentTabIndex"
+        (click)="selectTab(i);$event.stopPropagation();">{{tab.name}}</button>
+      }
+    }
+    @if (jobRun?.retry > 0) {
+      <nz-select nzSize="small" [ngModel]="selectedRetry" (ngModelChange)="onRetryChange($event)" nzPlaceHolder="Select Retry" title="Job retry" aria-label="Job retry">
+        @for (jobRetry of jobRetries; track jobRetry) {
+          <nz-option [nzValue]="jobRetry.retry" [nzLabel]="jobRetry.retry"></nz-option>
+        }
+      </nz-select>
+    }
+  </div>
+  <div class="menu right">
+    <button [class.active]="mode === displayModes.ANSI"
+    (click)="clickMode(displayModes.ANSI);$event.stopPropagation();">ANSI</button>
+    <button [class.active]="mode === displayModes.HTML"
+    (click)="clickMode(displayModes.HTML);$event.stopPropagation();">HTML</button>
+  </div>
+</div>
+@if (jobRun) {
+  <div class="scrollWrapper" (scroll)="onScroll($event)" (dblclick)="$event.stopPropagation();"
+    #scrollWrapper>
+    <!-- A job that has not run has no log: show what it waits for and what it will do, rather than an
+         empty panel. -->
+    @if (showPending) {
+      <div class="pending" role="status">
+        <span nz-icon [nzType]="pending.icon" nzTheme="outline" aria-hidden="true"></span>
+        <span class="label">{{pending.label}}</span>
+        @if (pending.since) {
+          <span class="since" title="Queued since">{{pending.since}}</span>
+        }
+      </div>
+    }
+    <!-- Display job services and steps -->
+    @for (logBlock of tabs[currentTabIndex].logBlocks; track trackStepElement(i, logBlock); let i = $index) {
+      <!-- The infos of the job are a block like the others, but it is not a step: with nothing to
+           say it is left out rather than shown empty. -->
+      @if (!logBlock.information || logBlock.lines.length > 0) {
+      <div class="step"
+        [attr.role]="websocket && !logBlock.closed ? 'log' : null">
+        <div class="line info" appClickable [attr.aria-expanded]="!logBlock.closed" (click)="clickOpenClose(logBlock)">
+          <div class="number">
+            @if (logBlock.totalLinesCount > 0 && !logBlock.loading && logBlock.closed) {
+              <span nz-icon
+              nzType="caret-right" nzTheme="fill" aria-hidden="true"></span>
+            }
+            @if (logBlock.totalLinesCount > 0 && !logBlock.loading && !logBlock.closed) {
+              <span nz-icon
+              nzType="caret-down" nzTheme="fill" aria-hidden="true"></span>
+            }
+            @if (logBlock.lines.length === 0 && logBlock.loading) {
+              <span nz-icon [nzType]="'loading'"></span>
+            }
+            {{logBlock.firstDisplayedLineNumber ? logBlock.firstDisplayedLineNumber : ''}}
+          </div>
+          <div class="value">{{logBlock.name}}</div>
+          <div class="extra">
+            @if (logBlock.startDate && !logBlock.duration) {
+              <div>
+                {{logBlock.startDate | date: 'long' }}
+              </div>
+            }
+            @if (logBlock.duration) {
+              <div title="Step duration">{{logBlock.duration}}</div>
+            }
+            @if (logBlock.optional) {
+              <div [class.orange]="logBlock.optional && logBlock.failed">Optional</div>
+            }
+            @if (logBlock.disabled) {
+              <div>Disabled</div>
+            }
+            @if (logBlock.failed && !logBlock.optional) {
+              <div class="red">Failed</div>
+            }
+          </div>
+          <div class="action">
+            @if (logBlock?.link) {
+              <a
+                [href]="'./cdscdn/item/' + logBlock.link.item_type + '/' + logBlock.link.api_ref + '/download?refresh=5'"
+                target="_blank" rel="noopener noreferrer" title="Share/download the step" aria-label="Share/download the step"
+                (click)="$event.stopPropagation()"><i nz-icon nzType="export" nzTheme="outline" aria-hidden="true"></i></a>
+              }
+            </div>
+          </div>
+          @if (!logBlock.closed) {
+            @for (line of logBlock.lines; track trackLineElement(j, line); let j = $index) {
+              <div class="line">
+                <div class="number">{{logBlock.firstDisplayedLineNumber + j + 1}}</div>
+                <div class="value">
+                  <pre [innerHTML]="line.value | ansi: (this.mode !== displayModes.ANSI) | safeHtml"></pre>
+                  @if (line.since) {
+                    <div class="since" title="Duration since step start">{{line.since |
+                      durationMs}}
+                    </div>
+                  }
+                </div>
+                @if (line.extra) {
+                  <div class="extra">
+                    @for (extra of line.extra; track extra) {
+                      <div>{{extra}}</div>
+                    }
+                  </div>
+                }
+              </div>
+            }
+            @if (logBlock.lines.length + logBlock.endLines.length < logBlock.totalLinesCount) {
+              <div class="line expand" appClickable aria-label="Load next lines"
+                (click)="clickExpandStepDown(logBlock.name, $event)">
+                <div class="number">
+                  <i nz-icon nzType="caret-down" nzTheme="fill" aria-hidden="true"></i>
+                  {{logBlock.firstDisplayedLineNumber +
+                  logBlock.lines.length + 1}}
+                </div>
+                <div class="value">…</div>
+              </div>
+            }
+            @if (logBlock.lines.length + logBlock.endLines.length < (logBlock.totalLinesCount - expandLoadLinesCount) - 1) {
+              <div class="line expand" appClickable aria-label="Load previous lines"
+                (click)="clickExpandStepUp(logBlock.name)">
+                <div class="number"><i nz-icon nzType="caret-up" nzTheme="fill" aria-hidden="true"></i>{{(logBlock.firstDisplayedLineNumber
+                +
+                logBlock.totalLinesCount) - logBlock.endLines.length}}
+              </div>
+              <div class="value">…</div>
+            </div>
+          }
+          @for (line of logBlock.endLines; track trackLineElement(j, line); let j = $index) {
+            <div class="line">
+              <div class="number">
+                {{((logBlock.firstDisplayedLineNumber + logBlock.totalLinesCount) - logBlock.endLines.length) +
+                j + 1}}
+              </div>
+              <div class="value">
+                <pre [innerHTML]="line.value | ansi: (this.mode !== displayModes.ANSI) | safeHtml"></pre>
+                @if (line.since) {
+                  <div class="since" title="Duration since step start">{{line.since |
+                  durationMs}}</div>
+                }
+              </div>
+              @if (line.extra) {
+                <div class="extra">
+                  @for (extra of line.extra; track extra) {
+                    <div>{{extra}}</div>
+                  }
+                </div>
+              }
+            </div>
+          }
+        }
+      </div>
+      }
+    }
+    <div class="footer">
+      <div class="goto" appClickable (click)="clickScroll(scrollTargets.BOTTOM)">Bottom<i nz-icon nzType="caret-down"
+      nzTheme="fill" aria-hidden="true"></i></div>
+      <div class="goto" appClickable (click)="clickScroll(scrollTargets.TOP)">Top<i nz-icon nzType="caret-up" nzTheme="fill" aria-hidden="true"></i>
+    </div>
+  </div>
+</div>
+}

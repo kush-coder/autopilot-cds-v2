@@ -1,0 +1,66 @@
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, inject, Input, OnInit } from '@angular/core';
+import { GraphNode } from '../graph.model';
+import { NodeStatus } from './model';
+import { SelectionMode, InteractiveNode } from '../graph.lib';
+
+@Component({
+    selector: 'app-fork-join-node',
+    templateUrl: './fork-join-node.html',
+    styleUrls: ['./fork-join-node.scss'],
+    changeDetection: ChangeDetectionStrategy.OnPush,
+    standalone: false
+})
+export class GraphForkJoinNodeComponent implements OnInit, InteractiveNode {
+    @Input() nodes: Array<GraphNode>;
+    @Input() type = 'fork';
+    @Input() actionCallback: (type: string, node: GraphNode) => void = () => { };
+
+    highlight = false;
+    status: string;
+    nodeStatusEnum = NodeStatus;
+
+    private _cd = inject(ChangeDetectorRef);
+
+    constructor() {
+        this.setHighlight.bind(this);
+        this.selectNode.bind(this);
+    }
+
+    ngOnInit() {
+        this.status = NodeStatus.sum(this.nodes.map(n => n.run ? n.run.status : null));
+    }
+
+    refreshRun(): void {
+        this.status = NodeStatus.sum(this.nodes.map(n => n.run ? n.run.status : null));
+        this._cd.markForCheck();
+    }
+
+    getNodes() {
+        return this.nodes;
+    }
+
+    onMouseEnter(): void {
+        this.nodes.forEach(n => { this.actionCallback('enter', n); });
+    }
+
+    onMouseOut(): void {
+        this.nodes.forEach(n => { this.actionCallback('out', n); });
+    }
+
+    setHighlight(active: boolean, options?: any): void {
+        this.highlight = active;
+        this._cd.markForCheck();
+    }
+
+    selectNode(navigationKey: string): void { }
+
+    activateNode(navigationKey: string): void { }
+
+    setRunActive(active: boolean): void { }
+
+    match(navigationKey: string): boolean { return false; }
+
+    setSelectionMode(navigationKey: string, mode: SelectionMode): void { }
+
+    setSelected(selectedRunJobIds: Array<string>): void { }
+}

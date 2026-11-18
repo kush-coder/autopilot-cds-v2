@@ -1,0 +1,321 @@
+<div id="WorkflowAdmin">
+  <nz-card nzTitle="Icon" class="coloredTitle">
+    <form nz-form>
+      <nz-form-item>
+        <nz-form-label [nzSpan]="3">Select icon</nz-form-label>
+        <nz-form-control>
+          <app-upload-button accept=".png,.jpg,.jpeg" [image]="true" (event)="fileEvent($event)">
+          </app-upload-button>
+        </nz-form-control>
+      </nz-form-item>
+      <nz-form-item>
+        @if (_workflow.icon) {
+          <img class="wf-icon" [src]="_workflow.icon" alt="application icon">
+        }
+      </nz-form-item>
+      @if (fileTooLarge) {
+        <nz-alert nzType="error" nzMessage="Your file is too large (max 100Ko)"></nz-alert>
+      }
+      <nz-form-item nzJustify="end">
+        @if (!iconUpdated && workflow.icon) {
+          <button nz-button nzDanger nzType="primary" class="multipleButtons"  [nzLoading]="loading"
+            name="deleteiconButton" (nzOnConfirm)="deleteIcon()" nz-popconfirm
+            nzPopconfirmTitle="Are you sure you want to delete the workflow icon ?">Delete
+          </button>
+        }
+        <button nz-button nzType="primary" [nzLoading]="loading" name="updateiconButton"
+          (click)="updateIcon()" >Save
+        </button>
+      </nz-form-item>
+    </form>
+  </nz-card>
+  <nz-card nzTitle="Settings" class="coloredTitle">
+    <form nz-form (ngSubmit)="onSubmitWorkflowUpdate()">
+      <nz-form-item>
+        <nz-form-label [nzSpan]="6" nzFor="cds-field-admin-name">Workflow name</nz-form-label>
+        <nz-form-control>
+          <input nz-input type="text" name="formWorkflowUpdateName" id="cds-field-admin-name"
+            [disabled]="loading || (workflow.from_repository && workflow.from_repository.length > 0)"
+            [(ngModel)]="workflow.name" [disabled]="loading" required #formWorkflowUpdateName="ngModel"
+            pattern="^[a-zA-Z0-9._-]{1,}$">
+          @if (formWorkflowUpdateName && formWorkflowUpdateName.invalid && !formWorkflowUpdateName.pristine) {
+            <nz-alert nzType="error"
+            nzMessage="Invalid workflow name. Allowed pattern is: ^[a-zA-Z0-9._-]{1,}$"></nz-alert>
+          }
+        </nz-form-control>
+      </nz-form-item>
+      <nz-form-item>
+        <nz-form-label [nzSpan]="6" nzFor="cds-field-admin-description">Description</nz-form-label>
+        <nz-form-control>
+          <textarea nz-input name="description" id="cds-field-admin-description" [(ngModel)]="_workflow.description"
+          [disabled]="loading"></textarea>
+        </nz-form-control>
+      </nz-form-item>
+      <nz-form-item>
+        <nz-form-label [nzSpan]="6" nzFor="cds-field-admin-tags">
+          Add sidebar's tags
+        </nz-form-label>
+        <nz-form-control>
+          @if (existingTags.length > 0) {
+            <div class="selectTag">
+              <nz-select name="tags" nzId="cds-field-admin-tags" nzShowSearch [nzLoading]="loading" [(ngModel)]="tagsToAdd" nzMode="multiple">
+                @for (i of existingTags; track i) {
+                  <nz-option [nzValue]="i" [nzLabel]="i"></nz-option>
+                }
+              </nz-select>
+              <button nz-button (click)="updateTagMetadata()" type="button" [disabled]="!tagsToAdd" aria-label="Add sidebar's tags">
+                <i nz-icon nzType="plus" nzTheme="outline" aria-hidden="true"></i>
+              </button>
+            </div>
+          }
+        </nz-form-control>
+      </nz-form-item>
+      <nz-form-item>
+        <nz-form-label [nzSpan]="6">Current tags <i nz-icon nzType="question-circle" nzTheme="outline" nz-tooltip nzTooltipTitle="Drag & drop to modify tags order (order by priority)"></i></nz-form-label>
+        <nz-form-control>
+          @if (selectedTags && selectedTags.length > 0) {
+            <div class="dragula-container" [dragula]="'bag-tag'"
+              [(dragulaModel)]="selectedTags">
+              @for (t of selectedTags; track t; let i = $index) {
+                <nz-tag>
+                  {{t + ' '}}
+                  @if (workflow.permissions.writable) {
+                    <i nz-icon nzType="close" nzTheme="outline" appClickable [attr.aria-label]="'Remove tag ' + t" (click)="removeFromSelectedTags(i)"></i>
+                  }
+                </nz-tag>
+              }
+            </div>
+          }
+          @if (!selectedTags || selectedTags.length === 0) {
+            <nz-alert nzType="info" nzMessage="There is no sidebar's tag"></nz-alert>
+          }
+        </nz-form-control>
+      </nz-form-item>
+      @if (!retentionRunsPolicyEnabled) {
+        <nz-form-item>
+          <nz-form-label [nzSpan]="6" nzFor="cds-field-admin-history-length">Maximum number of workflow runs</nz-form-label>
+          <nz-form-control>
+            <input nz-input type="number" name="formWorkflowUpdateHistory" id="cds-field-admin-history-length" [disabled]="loading"
+              [(ngModel)]="_workflow.history_length" required
+              #formWorkflowUpdateHistory="ngModel" min="1" max="500">
+          </nz-form-control>
+        </nz-form-item>
+      }
+      @if (!retentionRunsPolicyEnabled) {
+        <nz-form-item>
+          <nz-form-label [nzSpan]="6" nzFor="cds-field-admin-purge-tags">Purge tags</nz-form-label>
+          <nz-form-control>
+            <div class="selectTag">
+              <nz-select nzShowSearch nzMode="multiple" name="sidebartagzonehistory" nzId="cds-field-admin-purge-tags" [(ngModel)]="tagsToAddPurge" [nzLoading]="loading">
+                @for (i of existingTagsPurge; track i) {
+                  <nz-option [nzValue]="i" [nzLabel]="i">
+                  </nz-option>
+                }
+              </nz-select>
+              <button nz-button (click)="updateTagPurge()" type="button" [disabled]="!tagsToAddPurge" aria-label="Add purge tags"><i nz-icon nzType="plus" nzTheme="outline" aria-hidden="true"></i></button>
+            </div>
+          </nz-form-control>
+        </nz-form-item>
+      }
+      @if (!retentionRunsPolicyEnabled) {
+        <nz-form-item>
+          <nz-form-label [nzSpan]="6">Current purge tags</nz-form-label>
+          <nz-form-control>
+            @if (selectedTagsPurge && selectedTagsPurge.length > 0) {
+              <div class="dragula-container" [dragula]="'bag-tag'"
+                [(dragulaModel)]="selectedTagsPurge">
+                @for (t of selectedTagsPurge; track t; let i = $index) {
+                  <nz-tag>
+                    {{t + ' '}}
+                    @if (workflow.permissions.writable) {
+                      <i nz-icon nzType="close" nzTheme="outline" appClickable [attr.aria-label]="'Remove purge tag ' + t"
+                      (click)="removeFromSelectedTagsPurge(i)"></i>
+                    }
+                  </nz-tag>
+                }
+              </div>
+            }
+            @if (!selectedTagsPurge || selectedTagsPurge.length === 0) {
+              <nz-alert nzType="info" nzMessage="There is no purge tag"></nz-alert>
+            }
+          </nz-form-control>
+        </nz-form-item>
+      }
+      @if (maxRunsEnabled) {
+        <nz-form-item>
+          <nz-form-label [nzSpan]="6">Maximum number of workflow runs</nz-form-label>
+          <nz-form-control>
+            {{workflow.max_runs}}
+            <i nz-icon nzType="question-circle" nzTheme="outline" nz-tooltip nzTooltipTitle="You can contact a CDS administrator to customize this value"></i>
+          </nz-form-control>
+        </nz-form-item>
+      }
+      @if (retentionRunsPolicyEnabled && apiConfig) {
+        <nz-form-item >
+          <nz-form-label [nzSpan]="6">Workflow run retention policy <i nz-icon nzType="question-circle" nzTheme="outline" nz-popover [nzPopoverContent]="popupRetention"  nzPopoverTrigger="hover"></i></nz-form-label>
+          <ng-template #popupRetention>
+            <div class="retentionTooltip">
+              You can set a custom lua retention policy rule for this workflow.
+              Available variables are: {{availableStringVariables}}.
+              <br />
+              <br />
+              More informations and examples in CDS documentation
+              <a class="item" target="_blank" rel="noopener noreferrer" href="#"
+                [routerLink]="['/docs', 'docs', 'concepts', 'workflow', 'retention']">
+              here</a>.
+            </div>
+          </ng-template>
+          <nz-form-control>
+            <codemirror name="policy" [placeholder]="apiConfig?.default_run_retention_policy"
+              (change)="changeCodeMirror(codemirrorRetentionPolicy)"
+              [(ngModel)]="workflow.retention_policy" [config]="codeMirrorConfig"
+            #codemirrorRetentionPolicy></codemirror>
+          </nz-form-control>
+        </nz-form-item>
+      }
+      @if (retentionRunsPolicyEnabled && apiConfig) {
+        <nz-form-item  nzJustify="end">
+          <button nz-button  type="button" name="dryrun" [nzLoading]="loading"
+            (click)="retentionPolicyDryRun()">
+            Dry run
+          </button>
+          <nz-modal [(nzVisible)]="dryRunModalVisible" (nzOnCancel)="dryRunModalVisible = false" nzTitle="{{ 'workflow_retention_policy' | translate }}" nzWidth="900px">
+            <div *nzModalContent>
+              <ng-container>
+                @if (dryRunWarnings && dryRunWarnings?.length > 0) {
+                  <div>
+                    <nz-collapse>
+                      <ng-template #warningTmpl>
+                        <nz-tag [nzColor]="'red'">{{dryRunWarnings.length}}</nz-tag>
+                        Errors
+                      </ng-template>
+                      <nz-collapse-panel [nzHeader]="warningTmpl" [nzActive]="true">
+                        <ul>
+                          @for (w of dryRunWarnings; track w) {
+                            <li>{{w}}</li>
+                          }
+                        </ul>
+                      </nz-collapse-panel>
+                    </nz-collapse>
+                  </div>
+                }
+                <div class="alignRight">
+                  @if (dryRunStatus === 'INCOMING') {
+                    <i nz-icon [nzType]="'sync'" [nzSpin]="true" class="blue" role="img" aria-label="Status: in progress"></i>
+                  }
+                  @if (dryRunStatus === 'ERROR') {
+                    <i nz-icon nzType="close-circle" nzTheme="outline" class="red" role="img" aria-label="Status: error"></i>
+                  }
+                  @if (dryRunStatus === 'DONE') {
+                    <i nz-icon nzType="check-circle" nzTheme="outline" class="green" role="img" aria-label="Status: done"></i>
+                  }
+                  {{dryRunAnalyzedRuns + ' / ' + dryRunMaxDatas + ' run analyzed ( ' +
+                  dryRunDatas.length + ' runs kept )'}}
+                </div>
+              </ng-container>
+              @if (dryRunStatus === 'DONE' && (!dryRunDatas || dryRunDatas.length === 0)) {
+                <nz-alert nzType="info" nzMessage="All runs would be deleted"></nz-alert>
+              }
+              @if (dryRunDatas?.length > 0) {
+                <div class="dryrun">
+                  <h4>{{'workflow_retention_result_title' | translate }}</h4>
+                  <app-data-table [columns]="dryRunColumns" [data]="dryRunDatas"
+                  [withPagination]="10"></app-data-table>
+                </div>
+              }
+            </div>
+            <div *nzModalFooter>
+              <button nz-button (click)="dryRunModalVisible = false" autofocus>Close</button>
+            </div>
+          </nz-modal>
+        </nz-form-item>
+      }
+      <nz-form-item>
+        <nz-form-label nzFor="cds-field-admin-run-number">Current run number</nz-form-label>
+        <nz-form-control>
+          <input nz-input type="number" name="formWorkflowRunNumUpdateNumber" id="cds-field-admin-run-number"
+            [(ngModel)]="runnumber" required
+            #formWorkflowRunNumUpdateNumber="ngModel">
+        </nz-form-control>
+      </nz-form-item>
+      <nz-form-item nzJustify="end">
+        <button nz-button nzType="primary" type="submit" name="savebtn" [nzLoading]="loading"
+          [disabled]="loading">
+          @if (!editMode) {
+            <span>Save</span>
+          }
+          @if (editMode) {
+            <span>Apply</span>
+          }
+        </button>
+      </nz-form-item>
+    </form>
+  </nz-card>
+  <nz-card nzTitle="Integrations" class="coloredTitle">
+    <form nz-form>
+      <nz-form-item>
+        <nz-form-label nzFor="cds-field-admin-integration">Link an integration</nz-form-label>
+        <nz-form-control>
+          <div class="selectTag">
+            <nz-select nzShowSearch name="selectIntegration" nzId="cds-field-admin-integration" [(ngModel)]="selectedIntegration" placeholder="Link an integration...">
+              @for (t of filteredIntegrations; track t) {
+                <nz-option [nzValue]="t" [nzLabel]="t.name"></nz-option>
+              }
+            </nz-select>
+            <button nz-button type="button" nzType="primary" [nzLoading]="loading" (click)="addIntegration()"><i nz-icon nzType="plus" nzTheme="outline" aria-hidden="true"></i>Link</button>
+          </div>
+        </nz-form-control>
+      </nz-form-item>
+      @if (_workflow?.integrations?.length > nbEventIntegrations) {
+        <nz-form-item>
+          <nz-form-label>Configuration</nz-form-label>
+          <nz-form-control>
+            <nz-table [nzData]="_workflow.integrations | callback: filterIntegration" #integList>
+              <thead>
+                <tr>
+                  <th nzWidth="100px">Name</th>
+                  <th nzWidth="10px"></th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (integ of integList.data; track integ) {
+                  <tr>
+                    <td>
+                      {{integ.project_integration.name}}
+                    </td>
+                    <td class="alignRight">
+                      <button nz-button nzDanger nzType="primary" type="button" name="deleteBtn" [nzLoading]="loading"
+                        nz-popconfirm nzPopconfirmTitle="Are you sure you want to unlink this integration ?"
+                        (nzOnConfirm)="clickDeleteIntegration(integ)">
+                        Unlink
+                      </button>
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </nz-table>
+          </nz-form-control>
+        </nz-form-item>
+      }
+      @if (!_workflow?.integrations || _workflow.integrations.length === nbEventIntegrations) {
+        <nz-form-item >
+          <nz-form-control>
+            <nz-alert nzType="info" nzMessage="There is no linked integration on this workflow"></nz-alert>
+          </nz-form-control>
+        </nz-form-item>
+      }
+    </form>
+  </nz-card>
+  <nz-card nzTitle="Danger zone" class="redTitle">
+    <nz-row>
+      <nz-col [nzSpan]="12">
+        <div class="title">Delete workflow</div>
+        <div class="description">Once you delete a workflow, there is no going back. Please be certain.</div>
+      </nz-col>
+      <nz-col [nzSpan]="12" class="alignRight">
+        <button nz-button nzDanger nzType="primary" [nzLoading]="loading"
+        (click)="deleteWorkflow()">Delete</button>
+      </nz-col>
+    </nz-row>
+  </nz-card>
+</div>

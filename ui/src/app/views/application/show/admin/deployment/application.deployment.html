@@ -1,0 +1,123 @@
+<form nz-form class="AppRepository">
+  <nz-row>
+    <h3>Link an new integration</h3>
+  </nz-row>
+  <nz-row>
+    <nz-col [nzSpan]="8">
+      <nz-form-item>
+        <nz-form-label nzFor="cds-field-deployment-integration">Integration/Deployment</nz-form-label>
+        <nz-form-control>
+          <nz-select nzShowSearch id="cds-field-deployment-integration" name="selectIntegration" [(ngModel)]="selectedIntegration" >
+            @for (t of deploymentIntegrations; track t) {
+              <nz-option [nzLabel]="t.name" [nzValue]="t"></nz-option>
+            }
+          </nz-select>
+        </nz-form-control>
+      </nz-form-item>
+    </nz-col>
+    <nz-col [nzSpan]="13" class="configPadding">
+      @if (selectedIntegration?.model) {
+        <h3>{{ 'integration_configuration' | translate }}</h3>
+        @for (k of selectedIntegration.model.additional_default_config | keys; track k) {
+          <div>
+            <div class="six wide field">
+              <nz-form-item>
+                <nz-form-label [nzSpan]="6" nzFor="cds-field-new-{{k}}">
+                  {{k}}
+                  @if (selectedIntegration.model.additional_default_config[k].description) {
+                    <i nz-icon nzType="info-circle" nzTheme="outline" nz-tooltip nzTooltipPlacement="right"
+                    [nzTooltipTitle]="selectedIntegration.model.additional_default_config[k].description"></i>
+                  }
+                </nz-form-label>
+                <nz-form-control>
+                  @if (selectedIntegration.model.additional_default_config[k].type === 'string') {
+                    <input nz-input id="cds-field-new-{{k}}" name="{{k}}-value" type="text" [(ngModel)]="selectedIntegration.model.additional_default_config[k].value"
+                      >
+                  }
+                  @if (selectedIntegration.model.additional_default_config[k].type === 'password') {
+                    <input nz-input id="cds-field-new-{{k}}" name="{{k}}-value" type="password" [(ngModel)]="selectedIntegration.model.additional_default_config[k].value"
+                      >
+                  }
+                  @if (selectedIntegration.model.additional_default_config[k].type === 'text') {
+                    <textarea nz-input id="cds-field-new-{{k}}" name="{{k}}-value" rows="3" [(ngModel)]="selectedIntegration.model.additional_default_config[k].value"
+                    ></textarea>
+                  }
+                </nz-form-control>
+              </nz-form-item>
+            </div>
+          </div>
+        }
+      }
+    </nz-col>
+    <nz-col [nzSpan]="3" class="alignRight">
+      <button nz-button nzType="primary" name="savebtn" [nzLoading]="loadingBtn" type="button" (click)="addIntegration()"
+      [disabled]="!selectedIntegration || loadingBtn">Add</button>
+    </nz-col>
+  </nz-row>
+</form>
+<div class="fields">
+  <div [hidden]="!application.deployment_strategies">
+    @if (application.deployment_strategies) {
+      <h3>Linked integration</h3>
+      <nz-table [nzData]="getIntegrationNames()" #integList>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Configuration</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (pf of integList.data; track pf) {
+            <tr>
+              <td>
+                {{pf}}
+              </td>
+              <td>
+                <form nz-form>
+                  @for (k of application.deployment_strategies[pf] | keys; track k) {
+                    <nz-form-item>
+                      <nz-form-label [nzSpan]="6" nzFor="cds-field-{{pf}}-{{k}}">
+                        {{k}}
+                        @if (application.deployment_strategies[pf][k].description) {
+                          <i nz-icon nzType="info-circle" nzTheme="outline" nz-tooltip
+                          [nzTooltipTitle]="application.deployment_strategies[pf][k].description"></i>
+                        }
+                      </nz-form-label>
+                      <nz-form-control>
+                        @if (application.deployment_strategies[pf][k].type === 'string') {
+                          <input nz-input type="text" id="cds-field-{{pf}}-{{k}}" name="{{k}}-value" [(ngModel)]="application.deployment_strategies[pf][k].value"
+                            >
+                        }
+                        @if (application.deployment_strategies[pf][k].type === 'password') {
+                          <input nz-input type="password" id="cds-field-{{pf}}-{{k}}" name="{{k}}-value" [(ngModel)]="application.deployment_strategies[pf][k].value"
+                            >
+                        }
+                        @if (application.deployment_strategies[pf][k].type === 'text') {
+                          <textarea nz-input id="cds-field-{{pf}}-{{k}}" name="{{k}}-value" rows="3" [(ngModel)]="application.deployment_strategies[pf][k].value"
+                          ></textarea>
+                        }
+                      </nz-form-control>
+                    </nz-form-item>
+                  }
+                </form>
+              </td>
+              <td>
+                <div class="action alignRight">
+                  <button nz-button nzType="primary" [disabled]="loadingBtn" [nzLoading]="loadingBtn"
+                  type="button" (click)="updateIntegration(pf)">Save</button>
+                </div>
+                <div class="alignRight">
+                  <button nz-button nzDanger nzType="primary" [nzLoading]="loadingBtn"
+                    nz-popconfirm nzPopconfirmTitle="Are you sure you want to delete this integration ?"
+                  (nzOnConfirm)="clickDeleteIntegration(pf)">Delete</button>
+                </div>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </nz-table>
+    }
+  </div>
+</div>
+

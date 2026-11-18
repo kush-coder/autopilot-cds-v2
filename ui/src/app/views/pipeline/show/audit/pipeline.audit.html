@@ -1,0 +1,12 @@
+@if (pipeline && pipeline.audits) {
+  <div class="variable">
+    <app-data-table [withPagination]="25" [columns]="columns" [data]="pipeline.audits" [loading]="loading"
+      [withLineClick]="true" (clickLine)="compareIndex($event)">
+    </app-data-table>
+  </div>
+}
+@if (currentCompare) {
+  <div class="area">
+    <app-diff-list [items]="items"></app-diff-list>
+  </div>
+}

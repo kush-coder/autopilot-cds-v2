@@ -1,0 +1,14 @@
+@use '../workflow.node.common' as common;
+.workflowHook {
+  &.active {
+    color: common.$cds_color_teal;
+  }
+  i {
+    font-size: 25px;
+    display: unset;
+    margin: 0;
+  }
+  i.green {
+    color: common.$cds_color_green;
+  }
+}

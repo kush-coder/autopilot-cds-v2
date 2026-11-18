@@ -1,0 +1,65 @@
+<div class="wrapper">
+  <app-breadcrumb [path]="path"></app-breadcrumb>
+  <app-tabs [tabs]="tabs" (onSelect)="selectTab($event)"></app-tabs>
+  @if (selectedTab) {
+    <app-scrollview class="scrollview">
+      @switch (selectedTab.key) {
+        @case ('action') {
+          <nz-row>
+            <nz-col [nzSpan]="19">
+              @if (action) {
+                <app-action-form [groups]="groups" [action]="action" (save)="actionSave($event)"
+                (delete)="actionDelete()" [loading]="loading"></app-action-form>
+              }
+            </nz-col>
+            <nz-col [nzSpan]="5">
+              <app-action-help></app-action-help>
+              @if (action) {
+                <div class="nzSegment">
+                  @if (action.first_audit) {
+                    <div>
+                      <h3>{{ "common_created_by" | translate }}</h3>
+                      {{ action.first_audit.triggered_by }}
+                    </div>
+                  }
+                  <br />
+                  @if (action.last_audit) {
+                    <div>
+                      <h3>{{ "common_last_modified" | translate }}</h3>
+                      {{ action.last_audit.created }}
+                    </div>
+                  }
+                </div>
+              }
+            </nz-col>
+          </nz-row>
+        }
+        @case ('audits') {
+          <nz-row>
+            <nz-col [nzSpan]="24">
+              <app-data-table [withPagination]="10" [columns]="columnsAudits" [data]="audits" [loading]="loadingAudits"
+              [withLineClick]="true" (clickLine)="clickAudit($event)"></app-data-table>
+            </nz-col>
+            <nz-col [nzSpan]="24">
+              @if (diffItems) {
+                <app-diff-list [items]="diffItems"></app-diff-list>
+              }
+            </nz-col>
+          </nz-row>
+        }
+        @case ('usage') {
+          <nz-row>
+            <nz-col [nzSpan]="24">
+              @if (loadingUsage) {
+                <nz-spin nzTip="Loading..."></nz-spin>
+              }
+              @if (!loadingUsage) {
+                <app-action-usage [usage]="usage"></app-action-usage>
+              }
+            </nz-col>
+          </nz-row>
+        }
+      }
+    </app-scrollview>
+  }
+</div>

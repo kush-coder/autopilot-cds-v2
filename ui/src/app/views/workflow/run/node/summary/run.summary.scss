@@ -1,0 +1,84 @@
+@use '../../../../../../common' as common;
+
+#summary {
+    :host-context(.night) & {
+        .success {
+            background-color: common.$darkTheme_night_green;
+            border: 2px solid common.$darkTheme_green;
+            border-top: none;
+        }
+
+        .fail {
+            background-color: common.$darkTheme_night_red;
+            border: 2px solid common.$darkTheme_red;
+            border-top: none;
+        }
+
+        .building {
+            background-color: common.$darkTheme_night_blue;
+            border: 2px solid common.$darkTheme_blue;
+            border-top: none;
+        }
+
+        .inactive {
+            background-color: common.$darkTheme_night_grey;
+            border: 2px solid grey;
+            border-top: none;
+        }
+    }
+
+    .cardinfo {
+        border-radius: 0 0 0.28571429rem 0.28571429rem;
+
+        nz-row {
+          padding: 14px 14px;
+        }
+
+        .rightAlign {
+          text-align: right;
+        }
+        .center {
+          text-align: center;
+        }
+    }
+
+    .running {
+        border: none;
+    }
+
+    .success {
+        background-color: common.$cds_color_light_green;
+        border: 2px solid common.$cds_color_green;
+        border-top: none;
+    }
+
+    .fail {
+        background-color: common.$cds_color_light_red;
+        border: 2px solid common.$cds_color_red;
+        border-top: none;
+    }
+
+    .inactive {
+        background-color: common.$cds_color_light_grey;
+        border: 2px solid grey;
+        border-top: none;
+    }
+
+    .building {
+        background-color: common.$cds_color_light_teal;
+        border: 2px solid common.$cds_color_teal;
+        border-top: none;
+    }
+
+    nz-col {
+        a {
+            color: inherit;
+            text-decoration: underline;
+            font-weight: 600;
+        }
+    }
+}
+
+i {
+  margin-right: 5px;
+}

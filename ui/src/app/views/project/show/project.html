@@ -1,0 +1,129 @@
+<ng-template #tabPermissionTemplate>
+  <span nz-icon nzType="user-switch" nzTheme="outline" aria-hidden="true"></span>
+  Permissions
+  <ng-template #warnPermission>
+    Following groups that are not from organization "{{project.organization}}" can read the
+    project:
+    @for (gp of groupsOutsideOrganization; track gp; let i = $index) {
+      <span>{{gp.group.name}}
+      ({{gp.group.organization}}){{ i < groupsOutsideOrganization.length - 1 ? ', ' : '' }}</span>
+    }
+    .
+  </ng-template>
+  @if (project && groupsOutsideOrganization && groupsOutsideOrganization.length > 0) {
+    <i nz-icon nzType="warning"
+      class="orange" nzTheme="fill" nz-popover [nzPopoverContent]="warnPermission"
+    nzPopoverPlacement="bottomLeft" role="img" aria-label="Warning: groups outside the organization can read this project"></i>
+  }
+</ng-template>
+<div id="ProjectShow">
+  @if (project) {
+    <app-project-breadcrumb [project]="project" [workflow]="workflowName" [workflowRun]="workflowNum"
+      [workflowRunNode]="workflowNodeRun" [wPipeline]="workflowPipeline">
+    </app-project-breadcrumb>
+    <app-tabs [tabs]="tabs" (onSelect)="selectTab($event)"></app-tabs>
+    <div class="scrollingContent">
+      <div class="paddingContent">
+        @if (selectedTab) {
+          <div class="viewContent">
+            @switch (selectedTab.key) {
+              @case ('workflows') {
+                <div>
+                  <app-project-workflows [project]="project">
+                  </app-project-workflows>
+                </div>
+              }
+              @case ('applications') {
+                <div>
+                  <app-project-applications [project]="project">
+                  </app-project-applications>
+                </div>
+              }
+              @case ('pipelines') {
+                <div>
+                  <app-project-pipelines [project]="project">
+                  </app-project-pipelines>
+                </div>
+              }
+              @case ('environments') {
+                <div>
+                  <app-project-environments [project]="project">
+                  </app-project-environments>
+                </div>
+              }
+              @case ('variables') {
+                <div>
+                  <app-project-variables [project]="project">
+                  </app-project-variables>
+                </div>
+              }
+              @case ('permissions') {
+                <div>
+                  <app-project-permissions [project]="project">
+                  </app-project-permissions>
+                </div>
+              }
+            }
+          </div>
+        }
+      </div>
+    </div>
+  } @else {
+    <nz-spin nzTip="Loading project..."></nz-spin>
+  }
+  <ng-template #projectPart>
+    <app-project-breadcrumb [project]="project" [workflow]="workflowName" [workflowRun]="workflowNum"
+      [workflowRunNode]="workflowNodeRun" [wPipeline]="workflowPipeline">
+    </app-project-breadcrumb>
+    <app-tabs [tabs]="tabs" (onSelect)="selectTab($event)"></app-tabs>
+    <div class="scrollingContent">
+      <div class="paddingContent">
+        @if (selectedTab) {
+          <div class="viewContent">
+            @switch (selectedTab.key) {
+              @case ('workflows') {
+                <div>
+                  <app-project-workflows [project]="project">
+                  </app-project-workflows>
+                </div>
+              }
+              @case ('applications') {
+                <div>
+                  <app-project-applications [project]="project">
+                  </app-project-applications>
+                </div>
+              }
+              @case ('pipelines') {
+                <div>
+                  <app-project-pipelines [project]="project">
+                  </app-project-pipelines>
+                </div>
+              }
+              @case ('environments') {
+                <div>
+                  <app-project-environments [project]="project">
+                  </app-project-environments>
+                </div>
+              }
+              @case ('variables') {
+                <div>
+                  <app-project-variables [project]="project">
+                  </app-project-variables>
+                </div>
+              }
+              @case ('permissions') {
+                <div>
+                  <app-project-permissions [project]="project">
+                  </app-project-permissions>
+                </div>
+              }
+            }
+          </div>
+        }
+      </div>
+    </div>
+  </ng-template>
+  <ng-template #loadingPart>
+    <nz-spin nzTip="Loading project..."></nz-spin>
+  </ng-template>
+</div>

@@ -1,0 +1,20 @@
+@use "../../../../../../common" as common;
+form div {
+  width: 100%;
+}
+.unlink {
+  float:right;
+}
+nz-alert {
+  margin-bottom: 10px;
+  i {
+    font-size: 2em;
+  }
+  i.orange {
+    color: common.$cds_color_orange
+  }
+  .header {
+    font-size: 1.15em;
+    font-weight: 700;
+  }
+}

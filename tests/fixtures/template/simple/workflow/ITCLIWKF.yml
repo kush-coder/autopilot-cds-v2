@@ -1,0 +1,6 @@
+name: ITCLIWKF
+from: shared.infra/example-simple@1
+parameters:
+  data: '["one", "two"]'
+  deployWhen: success
+  withDeploy: "true"

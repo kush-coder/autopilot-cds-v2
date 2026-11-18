@@ -1,0 +1,60 @@
+#ActionEdit {
+  padding: 30px 30px 30px 30px;
+  margin-bottom: 70px;
+}
+
+.hideButton {
+  float: right;
+}
+
+nz-alert {
+  margin-top: 10px;
+}
+
+.jobSection, .jobSectionTitle {
+  margin-top: 15px;
+}
+.jobSectionTitle {
+  height: 40px;
+}
+
+nz-row {
+
+  min-height: 60px;
+
+  nz-col {
+    padding: 0 10px 0 10px;
+
+    .checkbox {
+      padding-top: 5px;
+    }
+
+    pre {
+      word-wrap: break-word;
+    }
+
+    .paramForm {
+      padding-top: 10px;
+    }
+  }
+}
+
+.bottomBtnsWrapper {
+  position: fixed;
+  bottom: 0;
+  right: 0;
+  width: 430px;
+  padding: 10px 10px 10px 10px;
+  .column {
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+  .ant-row {
+    padding-bottom: 4px;
+    padding-top: 4px;
+
+    .validButton {
+      width: 200px;
+    }
+  }
+}

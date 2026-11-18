@@ -1,0 +1,182 @@
+@if (nodeJobRun) {
+  <div class="job">
+    <div class="header">
+      <div class="menu left">
+        @if (tabs && tabs.length > 1) {
+          @for (tab of tabs; track tab; let i = $index) {
+            <button [class.active]="i === currentTabIndex"
+            (click)="selectTab(i)">{{tab.name}}</button>
+          }
+        }
+      </div>
+      <div class="menu right">
+        <button [class.active]="mode === displayModes.ANSI" (click)="clickMode(displayModes.ANSI)">ANSI</button>
+        <button [class.active]="mode === displayModes.HTML" (click)="clickMode(displayModes.HTML)">HTML</button>
+      </div>
+      <div class="menu right">
+        <button (click)="clickVariables()">Job variables</button>
+      </div>
+    </div>
+    <!-- Display job steps -->
+    @if (currentTabIndex === 0) {
+      @for (step of steps; track trackStepElement(i, step); let i = $index) {
+        <div class="step">
+          <div class="line info" appClickable [attr.aria-expanded]="!!step.open" (click)="clickOpen(step)">
+            <div class="number">
+              @if (step.totalLinesCount > 0 && !step.loading && !step.open) {
+                <span nz-icon nzType="caret-right" nzTheme="fill"></span>
+              }
+              @if (step.totalLinesCount > 0 && !step.loading && step.open) {
+                <span nz-icon nzType="caret-down" nzTheme="fill"></span>
+              }
+              @if (step.lines.length === 0 && step.loading) {
+                <span nz-icon [nzType]="'loading'"></span>
+              }
+              {{step.firstDisplayedLineNumber ? step.firstDisplayedLineNumber : ''}}
+            </div>
+            <div class="value">{{step.name}}</div>
+            <div class="extra">
+              @if (!step.disabled && step.startDate && !step.duration) {
+                <div>
+                  {{step.startDate | durationMs }}
+                </div>
+              }
+              @if (step.duration) {
+                <div title="Step duration">{{step.duration}}</div>
+              }
+              @if (step.optional) {
+                <div [class.orange]="step.optional && step.failed">Optional</div>
+              }
+              @if (step.disabled) {
+                <div>Disabled</div>
+              }
+              @if (step.failed && !step.optional) {
+                <div class="red">Failed</div>
+              }
+            </div>
+            @if (i>0) {
+              <div class="action">
+                @if (step?.link) {
+                  <a
+                    [href]="'./cdscdn/item/' + step.link.item_type + '/' + step.link.api_ref + '/download?refresh=5'"
+                    target="_blank" rel="noopener noreferrer" title="Share/download the step" aria-label="Share/download the step"
+                    (click)="$event.stopPropagation()"><i nz-icon nzType="export" nzTheme="outline" aria-hidden="true"></i></a>
+                  }
+                </div>
+              }
+            </div>
+            @if (step.open) {
+              @for (line of step.lines; track trackLineElement(j, line); let j = $index) {
+                <div class="line">
+                  <div class="number">{{step.firstDisplayedLineNumber + j + 1}}</div>
+                  <div class="value">
+                    <pre [innerHTML]="line.value | ansi: (this.mode !== displayModes.ANSI) | safeHtml"></pre>
+                    @if (line.since) {
+                      <div class="since" title="Duration since step start">{{line.since |
+                        durationMs}}
+                      </div>
+                    }
+                  </div>
+                  @if (line.extra) {
+                    <div class="extra">
+                      @for (extra of line.extra; track extra) {
+                        <div>{{extra}}</div>
+                      }
+                    </div>
+                  }
+                </div>
+              }
+              @if (step.lines.length + step.endLines.length < step.totalLinesCount) {
+                <div class="line expand"
+                  appClickable aria-label="Show more lines" (click)="clickExpandStepDown(i, $event)">
+                  <div class="number">
+                    <i nz-icon nzType="caret-down" nzTheme="fill"></i>
+                    {{step.firstDisplayedLineNumber +
+                    step.lines.length + 1}}
+                  </div>
+                  <div class="value">…</div>
+                </div>
+              }
+              @if (step.lines.length + step.endLines.length < (step.totalLinesCount - expandLoadLinesCount) - 1) {
+                <div class="line expand"
+                  appClickable aria-label="Show more lines" (click)="clickExpandStepUp(i, $event)">
+                  <div class="number"><i nz-icon nzType="caret-up" nzTheme="fill"></i>{{(step.firstDisplayedLineNumber +
+                  step.totalLinesCount) - step.endLines.length}}
+                </div>
+                <div class="value">…</div>
+              </div>
+            }
+            @for (line of step.endLines; track trackLineElement(j, line); let j = $index) {
+              <div class="line">
+                <div class="number">
+                  {{((step.firstDisplayedLineNumber + step.totalLinesCount) - step.endLines.length) + j + 1}}
+                </div>
+                <div class="value">
+                  <pre [innerHTML]="line.value | ansi: (this.mode !== displayModes.ANSI) | safeHtml"></pre>
+                  @if (line.since) {
+                    <div class="since" title="Duration since step start">{{line.since |
+                    durationMs}}</div>
+                  }
+                </div>
+                @if (line.extra) {
+                  <div class="extra">
+                    @for (extra of line.extra; track extra) {
+                      <div>{{extra}}</div>
+                    }
+                  </div>
+                }
+              </div>
+            }
+          }
+        </div>
+      }
+    }
+    <!-- Display service logs -->
+    @if (currentTabIndex > 0) {
+      <div class="step" role="log">
+        @for (line of services[currentTabIndex-1].lines; track trackLineElement(j, line); let j = $index) {
+          <div class="line"
+            >
+            <div class="number">{{j + 1}}</div>
+            <div class="value">
+              <pre [innerHTML]="line.value | ansi: (this.mode !== displayModes.ANSI) | safeHtml"></pre>
+            </div>
+          </div>
+        }
+        @if (services[currentTabIndex-1].lines.length + services[currentTabIndex-1].endLines.length < services[currentTabIndex-1].totalLinesCount) {
+          <div class="line expand"
+            appClickable aria-label="Show more lines" (click)="clickExpandServiceDown(currentTabIndex-1)">
+            <div class="number"><i nz-icon nzType="caret-down" nzTheme="fill"></i>{{services[currentTabIndex-1].lines.length + 1}}
+          </div>
+          <div class="value">…</div>
+        </div>
+      }
+      @if (services[currentTabIndex-1].lines.length + services[currentTabIndex-1].endLines.length < (services[currentTabIndex-1].totalLinesCount - expandLoadLinesCount) - 1) {
+        <div class="line expand"
+          appClickable aria-label="Show more lines" (click)="clickExpandServiceUp(currentTabIndex-1)">
+          <div class="number"><i nz-icon nzType="caret-up" nzTheme="fill"></i>{{(services[currentTabIndex-1].totalLinesCount) -
+          services[currentTabIndex-1].endLines.length}}
+        </div>
+        <div class="value">…</div>
+      </div>
+    }
+    @for (line of services[currentTabIndex-1].endLines; track trackLineElement(j, line); let j = $index) {
+      <div class="line"
+        >
+        <div class="number">
+          {{((services[currentTabIndex-1].totalLinesCount) - services[currentTabIndex-1].endLines.length) + j +
+          1}}
+        </div>
+        <div class="value">
+          <pre [innerHTML]="line.value | ansi: (this.mode !== displayModes.ANSI) | safeHtml"></pre>
+        </div>
+      </div>
+    }
+  </div>
+}
+<div class="footer">
+  <div class="goto" appClickable (click)="clickScroll(scrollTargets.BOTTOM)">Bottom<i nz-icon nzType="caret-down" nzTheme="fill" aria-hidden="true"></i></div>
+  <div class="goto" appClickable (click)="clickScroll(scrollTargets.TOP)">Top<i nz-icon nzType="caret-up" nzTheme="fill" aria-hidden="true"></i></div>
+</div>
+</div>
+}

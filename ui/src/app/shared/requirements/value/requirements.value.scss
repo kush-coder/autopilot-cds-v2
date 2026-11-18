@@ -1,0 +1,14 @@
+@use '../../../../common' as common;
+.icon.status {
+  font-size: 1.5em;
+  margin-top: 5px;
+}
+.green {
+  color: common.$cds_color_green;
+}
+.red {
+  color: common.$cds_color_red;
+}
+.orange {
+  color: common.$cds_color_orange;
+}

@@ -1,0 +1,68 @@
+name: Project Command TestSuite with CDS ctl
+testcases:
+- name: prepare test
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group remove ITCLIAPPPRJ --force
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project remove --force ITCLIAPPPRJ
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group remove ITCLIAPP_GRP --force
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group remove ITCLIAPP_GRP_EDIT_TEST --force
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group remove ITCLIAPP_GRP_EDIT_TEST1 --force
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group remove ITCLIAPP_GRP_EDIT_TEST2 --force
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group add ITCLIAPP_GRP
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project create ITCLIAPPPRJ "Test Project" ITCLIAPP_GRP
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group add ITCLIAPP_GRP_EDIT_TEST
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group add ITCLIAPP_GRP_EDIT_TEST1
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group add ITCLIAPP_GRP_EDIT_TEST2
+
+- name: project list
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project list
+    assertions:
+      - result.code ShouldEqual 0
+      - result.systemout ShouldContainSubstring ITCLIAPPPRJ
+
+- name: application add
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} application add ITCLIAPPPRJ TestApp
+
+- name: application list
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} application list ITCLIAPPPRJ
+
+- name: application show
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} application show ITCLIAPPPRJ TestApp
+
+- name: application variable add
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} application variable add ITCLIAPPPRJ TestApp var1 string value1
+
+- name: application variable show
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} application variable show ITCLIAPPPRJ TestApp var1
+
+- name: application variable remove
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} application variable delete ITCLIAPPPRJ TestApp var1
+
+- name: project keys list management
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project keys list ITCLIAPPPRJ
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project keys add ITCLIAPPPRJ mykeytest ssh
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project keys disable ITCLIAPPPRJ proj-mykeytest
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project keys list ITCLIAPPPRJ --fields name,disabled | grep proj-mykeytest
+    assertions:
+      - result.code ShouldEqual 0
+      - result.systemout ShouldContainSubstring true
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project keys enable ITCLIAPPPRJ proj-mykeytest
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project keys list ITCLIAPPPRJ --fields name,disabled | grep proj-mykeytest
+    assertions:
+      - result.code ShouldEqual 0
+      - result.systemout ShouldContainSubstring false
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project keys delete ITCLIAPPPRJ proj-mykeytest
+
+- name: clean
+  steps:
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} project delete --force ITCLIAPPPRJ
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group delete ITCLIAPP_GRP --force
+  - script: {{.cdsctl}} -f {{.cdsctl.config}} group delete ITCLIAPP_GRP_EDIT_TEST --force

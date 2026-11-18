@@ -1,0 +1,259 @@
+import { LiveAnnouncer } from '@angular/cdk/a11y';
+import { registerLocaleData } from '@angular/common';
+import localeEN from '@angular/common/locales/en';
+import { Component, inject, NgZone, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core';
+import { Title } from '@angular/platform-browser';
+import { ActivatedRoute, NavigationEnd, NavigationStart, ResolveEnd, ResolveStart, Router } from '@angular/router';
+import { TranslateService } from '@ngx-translate/core';
+import { Store } from '@ngxs/store';
+import { EventService } from 'app/event.service';
+import { GetCDSStatus } from 'app/store/cds.action';
+import { CDSState } from 'app/store/cds.state';
+import { Subscription, interval, of, zip } from 'rxjs';
+import { concatMap, filter, map, mergeMap } from 'rxjs/operators';
+import format from 'string-format-obj';
+import { AppService } from './app.service';
+import { AuthSummary } from './model/user.model';
+import { NotificationService } from './service/notification/notification.service';
+import { HelpService, MonitoringService, ThemeService } from './service/services.module';
+import { AutoUnsubscribe } from './shared/decorator/autoUnsubscribe';
+import { ToastService } from './shared/toast/ToastService';
+import { AuthenticationState } from './store/authentication.state';
+import { AddHelp } from './store/help.action';
+import { NzNotificationService } from 'ng-zorro-antd/notification';
+import { CodeEditorConfig, NzConfigService } from "ng-zorro-antd/core/config";
+import { PreferencesState } from './store/preferences.state';
+import { Editor } from './model/editor.model';
+import { WebSocketSubject } from 'rxjs/webSocket';
+import { EventV2Service } from './event-v2.service';
+
+declare const monaco: any;
+
+@Component({
+    standalone: false,
+    selector: 'app-root',
+    templateUrl: './app.component.html',
+    styleUrls: ['./app.component.scss']
+})
+@AutoUnsubscribe()
+export class AppComponent implements OnInit, OnDestroy {
+
+    _translate = inject(TranslateService);
+    _activatedRoute = inject(ActivatedRoute);
+    _titleService = inject(Title);
+    _router = inject (Router);
+    _notification = inject(NotificationService);
+    _appService = inject(AppService);
+    _toastService = inject(ToastService);
+    _store = inject(Store);
+    _eventService = inject(EventService);
+    _helpService = inject(HelpService);
+    _ngZone = inject(NgZone);
+    _monitoringService = inject(MonitoringService);
+    _nzNotificationService = inject(NzNotificationService);
+    _configService = inject(NzConfigService);
+    _eventV2Service = inject(EventV2Service)
+    _liveAnnouncer = inject(LiveAnnouncer);
+    // Instantiated here so that the system theme is known before the first theme resolution
+    _themeService = inject(ThemeService);
+
+    @ViewChild('templateRootToast') toastTemplate: TemplateRef<any>;
+    toastSubs: Subscription;
+
+    open: boolean;
+    isAPIAvailable: boolean;
+    isConnected: boolean;
+    hideNavBar: boolean;
+    heartbeatToken: number;
+    zone: NgZone;
+    showUIUpdatedBanner: boolean;
+    themeSubscriber: Subscription;
+    versionWorkerSubscription: Subscription;
+    _routerSubscription: Subscription;
+    _routerNavEndSubscription: Subscription;
+    displayResolver: boolean;
+
+    lastPing: number;
+    eventsRouteSubscription: Subscription;
+    maintenance: boolean;
+    cdsstateSub: Subscription;
+    currentAuthSummary: AuthSummary;
+    previousPath: string;
+    websocket: WebSocketSubject<any>;
+    loading = true;
+
+    constructor() {
+        this.zone = new NgZone({ enableLongStackTrace: false });
+        this._translate.addLangs(['en']);
+        this._translate.setDefaultLang('en');
+        this._translate.use('en');
+        registerLocaleData(localeEN);
+
+        this.themeSubscriber = this._store.select(PreferencesState.theme).subscribe(t => {
+            document.body.className = t;
+
+            if (t === 'night') {
+                const style = document.createElement('link');
+                style.type = 'text/css';
+                style.rel = 'stylesheet';
+                style.id = 'dark-theme';
+                style.href = 'ngzorro.dark.css';
+                document.body.appendChild(style);
+            } else {
+                const dom = document.getElementById('dark-theme');
+                if (dom) {
+                    dom.remove();
+                }
+            }
+
+            const defaultEditorOption: CodeEditorConfig = this._configService.getConfigForComponent('codeEditor')?.defaultEditorOption || {};
+            this._configService.set('codeEditor', {
+                defaultEditorOption: {
+                    ...defaultEditorOption,
+                    theme: t === 'night' ? 'vs-dark' : 'vs'
+                }
+            });
+        });
+
+        this._notification.requestPermission();
+
+        this.eventsRouteSubscription = this._router.events.subscribe(e => {
+            if (e instanceof NavigationStart) {
+                this.hideNavBar = e.url.startsWith('/auth');
+            }
+        });
+    }
+
+    ngOnDestroy(): void { } // Should be set to use @AutoUnsubscribe with AOT
+
+    ngOnInit(): void {
+        this._monitoringService.getStatus().subscribe(
+            (data) => {
+                this.isAPIAvailable = true;
+                this.loading = false;
+                this.load();
+            },
+            err => {
+                this.isAPIAvailable = false;
+                this.loading = false;
+                setTimeout(() => {
+                    window.location.reload();
+                }, 30000);
+            }
+        );
+
+        this.toastSubs = this._toastService.getObservable().subscribe(data => {
+            if (!this.toastTemplate) {
+                return;
+            }
+            this._nzNotificationService.template(this.toastTemplate, data)
+        });
+
+        const config: CodeEditorConfig = this._configService.getConfigForComponent('codeEditor');
+        this._configService.set('codeEditor', {
+            ...config,
+            extraConfig: {
+                paths: { vs: window.location.origin + '/assets/vs' } // https://github.com/microsoft/monaco-editor/issues/4778
+            },
+            onLoad: () => { monaco.languages.registerCompletionItemProvider("yaml", Editor.completionProvider(monaco)) }
+        });
+    }
+
+    load(): void {
+        this._helpService.getHelp().subscribe(h => this._store.dispatch(new AddHelp(h)));
+        this._store.dispatch(new GetCDSStatus());
+        this._store.select(AuthenticationState.summary).subscribe(s => {
+            if (!s) {
+                this.currentAuthSummary = null;
+                this.isConnected = false;
+                this._eventService.stopWebsocket();
+            } else {
+                this.currentAuthSummary = s;
+                this.isConnected = true;
+                localStorage.setItem('CDS-USER', this.currentAuthSummary.user.username);
+                this._eventService.startWebsocket();
+                this._eventV2Service.startWebsocket();
+            }
+        });
+        this.startVersionWorker();
+
+        this._routerSubscription = this._router.events
+            .pipe(filter((event) => event instanceof ResolveStart || event instanceof ResolveEnd))
+            .subscribe(e => {
+                if (e instanceof ResolveStart) {
+                    this.displayResolver = true;
+                }
+                if (e instanceof ResolveEnd) {
+                    this.displayResolver = false;
+                }
+            });
+
+        this._routerNavEndSubscription = this._router.events
+            .pipe(filter((event) => event instanceof NavigationEnd))
+            .pipe(map((e: NavigationEnd) => {
+                const path = e.url.split('?')[0]; 
+                if ((!this.previousPath || this.previousPath !== path)) {
+                    this.previousPath = path;
+                    this._eventService.subscribeAutoFromPath(path);
+                    this._eventV2Service.subscribeAutoFromPath(path);
+                    return;
+                }
+            }))
+            .pipe(map(() => this._activatedRoute))
+            .pipe(map((route) => {
+                let params = {};
+                while (route.firstChild) {
+                    route = route.firstChild;
+                    Object.assign(params, route.snapshot.params, route.snapshot.queryParams);
+                }
+                this._appService.updateRoute(params);
+                return { route, params: of(params) };
+            }))
+            .pipe(filter((event) => event.route.outlet === 'primary'))
+            .pipe(mergeMap((event) => zip(event.route.data, event.params)))
+            .subscribe((routeData) => {
+                if (!Array.isArray(routeData) || routeData.length < 2) {
+                    return;
+                }
+                if (routeData[0]['title']) {
+                    let title = format(routeData[0]['title'], routeData[1]);
+                    this._titleService.setTitle(title);
+                    this._liveAnnouncer.announce(title, 'polite');
+                } else {
+                    this._titleService.setTitle('CDS');
+                }
+            });
+
+        this.cdsstateSub = this._store.select(CDSState.getCurrentState()).subscribe(m => {
+            this.maintenance = m.maintenance;
+        });
+    }
+
+    startVersionWorker(): void {
+        this._ngZone.runOutsideAngular(() => {
+            this.versionWorkerSubscription = interval(60000)
+                .pipe(concatMap(_ => this._monitoringService.getVersion()))
+                .subscribe(v => {
+                    this._ngZone.run(() => {
+                        if ((<any>window).cds_version !== v.version) {
+                            this.showUIUpdatedBanner = true;
+                        }
+                    });
+                });
+        });
+    }
+
+    refresh(): void {
+        this.zone.runOutsideAngular(() => {
+            location.reload();
+        });
+    }
+
+    skipToMain(e: Event): void {
+        e.preventDefault();
+        const el = document.getElementById('main-content');
+        if (el) {
+            el.focus();
+        }
+    }
+}

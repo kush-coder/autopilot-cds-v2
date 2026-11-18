@@ -1,0 +1,17 @@
+name: artifactoryPromote
+type: action
+author: "François SAMIN <francois.samin@corp.ovh.com>"
+description: |
+  Promote artifactory package from a repository to another
+inputs:
+  artifacts:
+    type: string
+    description: Artifact name or wildcard pattern.
+    required: true
+  maturity:
+    type: string
+    description: The maturity you want to promote in.
+  properties:
+    type: string
+    description: Properties to add on the promoted artifacts
+

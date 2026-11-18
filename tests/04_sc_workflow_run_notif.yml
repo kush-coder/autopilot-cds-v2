@@ -1,0 +1,118 @@
+name: Create a simple workflow (04SCWorkflowRunNotif) that use worker export command, then check notif send
+vars :
+  smtpmock.url: 'http://localhost:2024'
+
+testcases:
+- name: Check SMTP mock
+  steps:  
+  - type: http
+    method: GET
+    url: '{{.smtpmock.url}}'
+    retry: 25
+    delay: 1
+
+- name: assert filepath, your current directory must be at the root of this project
+  steps:
+  - script: '[ -f ./fixtures/04SCWorkflowRunNotif/pipeline.yml ]'
+  - script: '[ -f ./fixtures/04SCWorkflowRunNotif/workflow.yml ]'
+
+- name: prepare test
+  steps:
+  - script: "{{.cdsctl}} -f {{.cdsctl.config}} project remove --force 04SCWORKFLOWRUNNOTIF"
+  - script: "{{.cdsctl}} -f {{.cdsctl.config}} group remove --force 04scworkflowrunnotif"
+  - script: "{{.cdsctl}} -f {{.cdsctl.config}} project add 04SCWORKFLOWRUNNOTIF 04SCWorkflowRunNotif"
+  - script: "{{.cdsctl}} -f {{.cdsctl.config}} project variable add 04SCWORKFLOWRUNNOTIF email_notif string \"notif1@locahost.local,notif2@locahost.local\""
+
+- name: import pipeline and workflow
+  steps:
+  - script:  {{.cdsctl}} -f {{.cdsctl.config}} pipeline import --force 04SCWORKFLOWRUNNOTIF ./fixtures/04SCWorkflowRunNotif/pipeline.yml
+  - script:  {{.cdsctl}} -f {{.cdsctl.config}} pipeline import --force 04SCWORKFLOWRUNNOTIF ./fixtures/04SCWorkflowRunNotif/empty.yml
+  - script:  {{.cdsctl}} -f {{.cdsctl.config}} workflow import --force 04SCWORKFLOWRUNNOTIF ./fixtures/04SCWorkflowRunNotif/workflow.yml
+  - script:  {{.cdsctl}} -f {{.cdsctl.config}} workflow import --force 04SCWORKFLOWRUNNOTIF ./fixtures/04SCWorkflowRunNotif/workflow-empty.yml
+
+- name: run workflow 04SCWorkflowRunNotif-WORKFLOW
+  steps:
+  - script:  {{.cdsctl}} -f {{.cdsctl.config}} workflow run 04SCWORKFLOWRUNNOTIF 04SCWorkflowRunNotif-WORKFLOW
+    assertions:
+    - result.code ShouldEqual 0
+    - "result.systemout ShouldContainSubstring Workflow 04SCWorkflowRunNotif-WORKFLOW #1 has been launched"
+
+- name: check workflow 04SCWorkflowRunNotif-WORKFLOW
+  steps:
+  - script:  {{.cdsctl}} -f {{.cdsctl.config}} workflow status 04SCWORKFLOWRUNNOTIF 04SCWorkflowRunNotif-WORKFLOW 1 --format json
+    retry: 200
+    delay: 1
+    assertions:
+    - result.code ShouldEqual 0
+    - result.systemoutjson.last_execution ShouldNotBeEmpty
+    - result.systemoutjson.start ShouldNotBeEmpty
+    - result.systemoutjson.num ShouldContainSubstring 1
+    - result.systemoutjson.status ShouldEqual Success
+
+- name: check-mail-notif
+  steps:
+  - type: http
+    method: GET
+    url: '{{.smtpmock.url}}/messages/notif@localhost.local'
+    assertions:
+    - result.statuscode ShouldEqual 200
+    - result.bodyjson ShouldHaveLength 1
+    retry: 10
+    delay: 3
+  - type: http
+    method: GET
+    url: '{{.smtpmock.url}}/messages/notif@localhost.local/latest'
+    assertions:
+    - result.statuscode ShouldEqual 200
+    retry: 10
+    delay: 3
+    vars:
+      verify: 
+        from: result.bodyjson.content-decoded
+        regex: logcontent:foo2
+  - type: http
+    method: GET
+    url: '{{.smtpmock.url}}/messages/notif1@locahost.local'
+    assertions:
+    - result.statuscode ShouldEqual 200
+    - result.bodyjson ShouldHaveLength 1
+    retry: 10
+    delay: 3
+  - type: http
+    method: GET
+    url: '{{.smtpmock.url}}/messages/notif2@locahost.local'
+    assertions:
+    - result.statuscode ShouldEqual 200
+    - result.bodyjson ShouldHaveLength 1
+    retry: 10
+    delay: 3
+
+- name: run workflow 04SCWorkflowRunNotif-WORKFLOW-EMPTY
+  steps:
+  - script:  {{.cdsctl}} -f {{.cdsctl.config}} workflow run 04SCWORKFLOWRUNNOTIF 04SCWorkflowRunNotif-WORKFLOW-EMPTY
+    assertions:
+    - result.code ShouldEqual 0
+    - "result.systemout ShouldContainSubstring Workflow 04SCWorkflowRunNotif-WORKFLOW-EMPTY #1 has been launched"
+
+- name: check workflow 04SCWorkflowRunNotif-WORKFLOW-EMPTY
+  steps:
+  - script:  {{.cdsctl}} -f {{.cdsctl.config}} workflow status 04SCWORKFLOWRUNNOTIF 04SCWorkflowRunNotif-WORKFLOW-EMPTY 1 --format json
+    retry: 200
+    delay: 1
+    assertions:
+    - result.code ShouldEqual 0
+    - result.systemoutjson.last_execution ShouldNotBeEmpty
+    - result.systemoutjson.start ShouldNotBeEmpty
+    - result.systemoutjson.num ShouldContainSubstring 1
+    - result.systemoutjson.status ShouldEqual Success
+
+- name: check-mail-notif-empty
+  steps:
+  - type: http
+    method: GET
+    url: '{{.smtpmock.url}}/messages/notif-empty@localhost.local'
+    assertions:
+    - result.statuscode ShouldEqual 200
+    - result.bodyjson ShouldHaveLength 1
+    retry: 30
+    delay: 1

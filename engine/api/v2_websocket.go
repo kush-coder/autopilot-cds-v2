@@ -1,0 +1,433 @@
+package api
+
+import (
+	"context"
+	"math/rand"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/go-gorp/gorp"
+	"github.com/rockbears/log"
+
+	"github.com/ovh/cds/engine/api/rbac"
+	"github.com/ovh/cds/engine/api/region"
+	"github.com/ovh/cds/engine/cache"
+	"github.com/ovh/cds/engine/service"
+	"github.com/ovh/cds/engine/websocket"
+	"github.com/ovh/cds/sdk"
+	"github.com/ovh/cds/sdk/telemetry"
+)
+
+type websocketV2Server struct {
+	server     *websocket.Server
+	mutex      sync.RWMutex
+	clientData map[string]*websocketV2ClientData
+}
+
+func (s *websocketV2Server) AddClient(c websocket.Client, data *websocketV2ClientData) {
+	s.server.AddClient(c)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.clientData[c.UUID()] = data
+}
+
+func (s *websocketV2Server) RemoveClient(uuid string) {
+	s.server.RemoveClient(uuid)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	delete(s.clientData, uuid)
+}
+
+func (s *websocketV2Server) GetClientData(uuid string) *websocketV2ClientData {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	data, ok := s.clientData[uuid]
+	if !ok {
+		return nil
+	}
+	return data
+}
+
+type webSocketV2Filters []sdk.WebsocketV2Filter
+
+func (f webSocketV2Filters) HasOneKey(keys ...string) (found bool, needPostCheck bool) {
+	for i := range keys {
+		for _, filter := range f {
+			if keys[i] != filter.Key() {
+				continue
+			}
+			found = true
+			switch filter.Type {
+			case sdk.WebsocketV2FilterTypeGlobal,
+				sdk.WebsocketV2FilterTypeProjectRuns,
+				sdk.WebsocketV2FilterTypeQueue:
+				needPostCheck = true
+			default:
+				// A filter that needs no post check is enough to allow the event, whatever the other
+				// filters matching it.
+				return true, false
+			}
+		}
+	}
+	return
+}
+
+func (f webSocketV2Filters) GetFirstByType(filterType sdk.WebsocketV2FilterType) *sdk.WebsocketV2Filter {
+	for _, filter := range f {
+		if filter.Type == filterType {
+			return &filter
+		}
+	}
+	return nil
+}
+
+type websocketV2ClientData struct {
+	AuthConsumer sdk.AuthUserConsumer
+	mutex        sync.Mutex
+	filters      webSocketV2Filters
+	accessMutex  sync.Mutex
+	access       *runJobAccess
+}
+
+// runJobAccessTTL bounds how long the permissions of a client are held before being read again. A
+// right taken away reaches an open connection within that delay; registering a filter checks the
+// permissions of the moment anyway.
+const runJobAccessTTL = 30 * time.Second
+
+// runJobAccess is what a client may see of the job events: the projects it can read and the regions
+// it can execute on. It follows the consumer, not the event, so it is read once for a while rather
+// than for each of the job events of the instance, of which a single job produces eight.
+type runJobAccess struct {
+	projectKeys sdk.StringSlice
+	regionNames sdk.StringSlice
+	readAt      time.Time
+}
+
+func (c *websocketV2ClientData) runJobEventAccess(ctx context.Context, db gorp.SqlExecutor) (*runJobAccess, error) {
+	// Held for the read so that a burst of events on a client that has nothing cached asks the
+	// database once instead of once per event.
+	c.accessMutex.Lock()
+	defer c.accessMutex.Unlock()
+
+	if c.access != nil && time.Since(c.access.readAt) < runJobAccessTTL {
+		return c.access, nil
+	}
+
+	userID := c.AuthConsumer.AuthConsumerUser.AuthentifiedUserID
+
+	projectKeys, err := rbac.LoadAllProjectKeysAllowed(ctx, db, sdk.ProjectRoleRead, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	rbacRegions, err := rbac.LoadRegionIDsByRoleAndUserID(ctx, db, sdk.RegionRoleExecute, userID)
+	if err != nil {
+		return nil, err
+	}
+	regionIDs := sdk.StringSlice{}
+	for _, r := range rbacRegions {
+		regionIDs = append(regionIDs, r.RegionID)
+	}
+	regionIDs.Unique()
+
+	allowedRegions, err := region.LoadRegionByIDs(ctx, db, regionIDs)
+	if err != nil {
+		return nil, err
+	}
+	regionNames := sdk.StringSlice{}
+	for _, r := range allowedRegions {
+		regionNames = append(regionNames, r.Name)
+	}
+
+	c.access = &runJobAccess{projectKeys: projectKeys, regionNames: regionNames, readAt: time.Now()}
+	return c.access, nil
+}
+
+func (c *websocketV2ClientData) updateEventFilters(ctx context.Context, db gorp.SqlExecutor, cache cache.Store, msg []byte) error {
+	var fs []sdk.WebsocketV2Filter
+
+	var f sdk.WebsocketV2Filter
+	if err := sdk.JSONUnmarshal(msg, &f); err == nil {
+		fs = []sdk.WebsocketV2Filter{f}
+	} else {
+		if err := sdk.JSONUnmarshal(msg, &fs); err != nil {
+			return sdk.WrapError(err, "cannot unmarshal websocket input message")
+		}
+	}
+
+	var isMaintainer = c.AuthConsumer.Maintainer()
+
+	// Check validity of given filters
+	for _, f := range fs {
+		if err := f.IsValid(); err != nil {
+			return err
+		}
+		switch f.Type {
+		case sdk.WebsocketV2FilterTypeProject,
+			sdk.WebsocketV2FilterTypeProjectPurgeReport,
+			sdk.WebsocketV2FilterTypeProjectRuns,
+			sdk.WebsocketV2FilterTypeProjectRun:
+			if isMaintainer {
+				continue
+			}
+			hasRole, err := rbac.HasRoleOnProjectAndUserID(ctx, db, sdk.ProjectRoleRead, c.AuthConsumer.AuthConsumerUser.AuthentifiedUser.ID, f.ProjectKey)
+			if err != nil {
+				return err
+			}
+			if !hasRole {
+				return sdk.WithStack(sdk.ErrForbidden)
+			}
+		}
+	}
+
+	// Update client filters
+	c.mutex.Lock()
+	c.filters = fs
+	c.mutex.Unlock()
+
+	log.Debug(ctx, "websocketV2ClientData.updateEventFilters> event filters updated for client %q with: %v", c.AuthConsumer.ID, fs)
+
+	return nil
+}
+
+// For some event we need to check if it should be sent or not depending permissions or filters
+//
+// run is the run the event carries, read once for every client the event is offered to, and nil
+// when the event carries none or it could not be read.
+func (c *websocketV2ClientData) eventPostCheck(ctx context.Context, db gorp.SqlExecutor, cache cache.Store, event sdk.FullEventV2, run *sdk.EventWorkflowRunPayload) (result bool, err error) {
+	log.Debug(ctx, "websocketV2ClientData.eventPostCheck> running eventPostCheck for event.Type: %q", string(event.Type))
+	defer log.Debug(ctx, "websocketV2ClientData.eventPostCheck> result eventPostCheck for event.Type: %q is %t", string(event.Type), result)
+
+	var isMaintainer = c.AuthConsumer.Maintainer()
+
+	if strings.HasPrefix(string(event.Type), "RunJob") {
+		if isMaintainer {
+			return true, nil
+		}
+
+		access, err := c.runJobEventAccess(ctx, db)
+		if err != nil {
+			return false, err
+		}
+		return access.projectKeys.Contains(event.ProjectKey) && access.regionNames.Contains(event.Region), nil
+	}
+
+	// Post check to return only runs according query filters
+	if event.Type == sdk.EventRunCrafted || event.Type == sdk.EventRunBuilding || event.Type == sdk.EventRunEnded || event.Type == sdk.EventRunRestart {
+		filter := c.filters.GetFirstByType(sdk.WebsocketV2FilterTypeProjectRuns)
+		if filter == nil || run == nil {
+			return false, nil
+		}
+
+		query, err := url.ParseQuery(filter.ProjectRunsParams)
+		if err != nil {
+			return false, sdk.WrapError(err, "cannot parse project_runs_params filter")
+		}
+		filters, offset, _, _ := parseWorkflowRunsSearchV2Query(query)
+
+		// The filters are matched against the run the event carries. Nothing is read: what is asked
+		// here is whether the run is one the client asked to see, and whether the client may read
+		// the project at all was settled when it registered this filter.
+		//
+		// The page is not part of the answer, where replaying the search made it one. A client
+		// reading further down the list is pushed nothing, since the only place a run list has for a
+		// run arriving is its top; on the first page every run the search matches is pushed, and
+		// where it belongs among those displayed is for the list to decide.
+		if offset > 0 {
+			return false, nil
+		}
+		return run.ProjectKey == filter.ProjectKey && filters.MatchesRun(*run), nil
+	}
+
+	return false, nil
+}
+
+func (a *API) initWebsocketV2(pubSubKey string) error {
+	log.Info(a.Router.Background, "Initializing WS V2 server")
+	a.WSV2Server = &websocketV2Server{
+		server:     websocket.NewServer(),
+		clientData: make(map[string]*websocketV2ClientData),
+	}
+	// The ticker belongs to the goroutine reading it: created here, the deferred stop would run when
+	// this function returns, which is before the first tick, and the count would never be recorded.
+	a.GoRoutines.Run(a.Router.Background, "api.initWebsocketV2.WSV2Server", func(ctx context.Context) {
+		tickerMetrics := time.NewTicker(10 * time.Second)
+		defer tickerMetrics.Stop()
+		for {
+			select {
+			case <-tickerMetrics.C:
+				telemetry.Record(a.Router.Background, WebSocketV2Clients, int64(len(a.WSV2Server.server.ClientIDs())))
+			case <-ctx.Done():
+				telemetry.Record(a.Router.Background, WebSocketV2Clients, 0)
+				return
+			}
+		}
+	})
+
+	log.Info(a.Router.Background, "Initializing WS V2 events broker")
+	pubSub, err := a.Cache.Subscribe(pubSubKey)
+	if err != nil {
+		return sdk.WrapError(err, "unable to subscribe to %s", pubSubKey)
+	}
+	a.WSV2Broker = websocket.NewBroker()
+	a.WSV2Broker.OnMessage(func(m []byte) {
+		telemetry.Record(a.Router.Background, WebSocketV2Events, 1)
+
+		var e sdk.FullEventV2
+		if err := sdk.JSONUnmarshal(m, &e); err != nil {
+			err = sdk.WrapError(err, "cannot parse event from WS broker")
+			ctx := sdk.ContextWithStacktrace(context.TODO(), err)
+			log.Warn(ctx, err.Error())
+			return
+		}
+		a.websocketV2OnMessage(e)
+	})
+	a.WSV2Broker.Init(a.Router.Background, a.GoRoutines, pubSub)
+	return nil
+}
+
+func (a *API) getWebsocketV2Handler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) (err error) {
+		c, err := websocket.Upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			service.WriteError(ctx, w, r, sdk.NewErrorWithStack(err, sdk.ErrWebsocketUpgrade))
+			return nil
+		}
+		defer c.Close()
+
+		uc := getUserConsumer(ctx)
+
+		wsClient := websocket.NewClient(c)
+		wsClientData := &websocketV2ClientData{
+			AuthConsumer: *uc,
+		}
+
+		wsClient.OnMessage(func(m []byte) {
+			if err := wsClientData.updateEventFilters(ctx, a.mustDBWithCtx(ctx), a.Cache, m); err != nil {
+				err = sdk.WithStack(err)
+				ctx = sdk.ContextWithStacktrace(ctx, err)
+				log.Warn(ctx, err.Error())
+				wsClient.Send(sdk.WebsocketV2Event{Status: "KO", Error: sdk.Cause(err).Error()})
+			}
+		})
+
+		a.WSV2Server.AddClient(wsClient, wsClientData)
+		defer a.WSV2Server.RemoveClient(wsClient.UUID())
+
+		return wsClient.Listen(ctx, a.GoRoutines)
+	}
+}
+
+func (a *API) websocketV2OnMessage(e sdk.FullEventV2) {
+	eventKeys := a.websocketV2ComputeEventKeys(e)
+	if len(eventKeys) == 0 {
+		return
+	}
+
+	// The run an event carries is read once here rather than by each of the clients it is offered
+	// to: it is what the filters of a run list are matched against.
+	var run *sdk.EventWorkflowRunPayload
+	if e.Type == sdk.EventRunCrafted || e.Type == sdk.EventRunBuilding || e.Type == sdk.EventRunEnded || e.Type == sdk.EventRunRestart {
+		var payload sdk.EventWorkflowRunPayload
+		if err := sdk.JSONUnmarshal(e.Payload, &payload); err != nil {
+			ctx := sdk.ContextWithStacktrace(context.TODO(), err)
+			log.Warn(ctx, "api.websocketV2OnMessage> cannot read the run of a %s event: %v", e.Type, err)
+		} else {
+			run = &payload
+		}
+	}
+
+	clientIDs := a.WSV2Server.server.ClientIDs()
+	// Randomize the order of client to prevent the old client to always received new events in priority
+	rand.Shuffle(len(clientIDs), func(i, j int) { clientIDs[i], clientIDs[j] = clientIDs[j], clientIDs[i] })
+
+	for _, id := range clientIDs {
+		// Copy idx for goroutine
+		clientID := id
+
+		// Send the event to the client websocket within a goroutine
+		a.GoRoutines.Exec(context.Background(), "websocket-"+clientID, func(ctx context.Context) {
+			c := a.WSV2Server.GetClientData(clientID)
+			if c == nil {
+				return
+			}
+
+			c.mutex.Lock()
+			found, needPostCheck := c.filters.HasOneKey(eventKeys...)
+			c.mutex.Unlock()
+
+			log.Debug(ctx, "api.websocketV2OnMessage> check if event need to be sent to client %s for user %s with keys: %q return found: %t and needPostCheck: %t", clientID, c.AuthConsumer.GetUsername(), eventKeys, found, needPostCheck)
+
+			if !found {
+				return
+			}
+
+			if needPostCheck {
+				allowed, err := c.eventPostCheck(ctx, a.mustDBWithCtx(ctx), a.Cache, e, run)
+				if err != nil {
+					err = sdk.WrapError(err, "unable to validate event post check for client %s with consumer id: %s", clientID, c.AuthConsumer.ID)
+					ctx = sdk.ContextWithStacktrace(ctx, err)
+					log.Error(ctx, err.Error())
+					return
+				}
+				if !allowed {
+					return
+				}
+			}
+			log.Debug(ctx, "api.websocketV2OnMessage> send data to client %s for user %s", clientID, c.AuthConsumer.GetUsername())
+			if err := a.WSV2Server.server.SendToClient(clientID, sdk.WebsocketV2Event{
+				Status: "OK",
+				Event:  e,
+			}); err != nil {
+				log.Debug(ctx, "api.websocketV2OnMessage> can't send to client %s it will be removed: %+v", clientID, err)
+				a.WSV2Server.RemoveClient(clientID)
+			}
+		})
+	}
+}
+
+// This func will compute all the filter keys that match a given event.
+func (a *API) websocketV2ComputeEventKeys(event sdk.FullEventV2) []string {
+	// Compute required filter(s) key for given event
+	var keys []string
+
+	// Every event carrying a workflow run id is of interest for a client watching that run: the run
+	// itself, its jobs, their steps and their results. Read access on the project was checked when the
+	// filter was registered, so no post check is needed.
+	if event.WorkflowRunID != "" {
+		keys = append(keys, sdk.WebsocketV2Filter{
+			Type:          sdk.WebsocketV2FilterTypeProjectRun,
+			ProjectKey:    event.ProjectKey,
+			WorkflowRunID: event.WorkflowRunID,
+		}.Key())
+	}
+
+	// Event that match project-runs filter
+	switch event.Type {
+	case sdk.EventRepositoryCreated, sdk.EventRepositoryDeleted, sdk.EventAnalysisStart, sdk.EventAnalysisDone:
+		keys = append(keys, sdk.WebsocketV2Filter{
+			Type:       sdk.WebsocketV2FilterTypeProject,
+			ProjectKey: event.ProjectKey,
+		}.Key())
+	case sdk.EventRunCrafted, sdk.EventRunBuilding, sdk.EventRunEnded, sdk.EventRunRestart:
+		keys = append(keys, sdk.WebsocketV2Filter{
+			Type:       sdk.WebsocketV2FilterTypeProjectRuns,
+			ProjectKey: event.ProjectKey,
+		}.Key())
+	case sdk.EventProjectPurge:
+		keys = append(keys, sdk.WebsocketV2Filter{
+			Type:          sdk.WebsocketV2FilterTypeProjectPurgeReport,
+			ProjectKey:    event.ProjectKey,
+			PurgeReportID: event.PurgeReportID,
+		}.Key())
+	case sdk.EventRunJobEnqueued, sdk.EventRunJobBlocked, sdk.EventRunJobCancelled, sdk.EventRunJobSkipped, sdk.EventRunJobStopped, sdk.EventRunJobScheduled, sdk.EventRunJobBuilding, sdk.EventRunJobEnded:
+		keys = append(keys, sdk.WebsocketV2Filter{
+			Type: sdk.WebsocketV2FilterTypeQueue,
+		}.Key())
+	}
+
+	return keys
+}

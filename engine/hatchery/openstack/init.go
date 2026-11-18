@@ -1,0 +1,200 @@
+package openstack
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+
+	"github.com/gophercloud/gophercloud"
+	"github.com/gophercloud/gophercloud/openstack"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/tenantnetworks"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/flavors"
+	"github.com/rockbears/log"
+
+	"github.com/ovh/cds/sdk"
+)
+
+// InitHatchery fetch uri from nova
+// then list available models
+// then list available images
+func (h *HatcheryOpenstack) InitHatchery(ctx context.Context) error {
+	if err := h.Common.Init(ctx, h); err != nil {
+		return err
+	}
+
+	h.cache = NewCache(h.Config.Cache.ImagesExpirationDelay, h.Config.Cache.ServersExpirationDelay)
+
+	workersAlive = map[string]int64{}
+
+	authOpts := gophercloud.AuthOptions{
+		Username:         h.Config.User,
+		Password:         h.Config.Password,
+		AllowReauth:      true,
+		IdentityEndpoint: h.Config.Address,
+		TenantName:       h.Config.Tenant,
+		DomainName:       h.Config.Domain,
+	}
+
+	provider, err := openstack.AuthenticatedClient(authOpts)
+	if err != nil {
+		return sdk.WithStack(fmt.Errorf("unable to openstack.AuthenticatedClient: %v", err))
+	}
+
+	openstackClient, err := openstack.NewComputeV2(provider, gophercloud.EndpointOpts{Region: h.Config.Region})
+	if err != nil {
+		return sdk.WithStack(fmt.Errorf("unable to openstack.NewComputeV2: %v", err))
+	}
+	h.openstackClient = openstackClient
+
+	if err := h.initFlavors(); err != nil {
+		log.Warn(ctx, "Error getting flavors: %v", err)
+		return err
+	}
+
+	if err := h.initNetworks(); err != nil {
+		log.Warn(ctx, "Error getting networks: %v", err)
+	}
+
+	if err := h.initIPStatus(ctx); err != nil {
+		log.Warn(ctx, "Error on initIPStatus(): %v", err)
+	}
+
+	h.initImagesUsername(ctx)
+	h.initImagesBookDelay()
+	h.initImagesWorkerBasedir()
+
+	h.GoRoutines.Run(ctx, "hatchery openstack routines", func(ctx context.Context) {
+		h.main(ctx)
+	})
+
+	return nil
+}
+
+func (h *HatcheryOpenstack) initFlavors() error {
+	all, err := flavors.ListDetail(h.openstackClient, nil).AllPages()
+	if err != nil {
+		return sdk.WithStack(fmt.Errorf("initFlavors> error on flavors.ListDetail: %v", err))
+	}
+	lflavors, err := flavors.ExtractFlavors(all)
+	if err != nil {
+		return sdk.WithStack(fmt.Errorf("initFlavors> error on flavors.ExtractFlavors: %v", err))
+	}
+
+	h.flavors = h.filterAllowedFlavors(lflavors)
+
+	return nil
+}
+
+func (h *HatcheryOpenstack) filterAllowedFlavors(allFlavors []flavors.Flavor) []flavors.Flavor {
+	// If allowed flavors are given in configuration we should check that given flavor is part of the list.
+	if len(h.Config.Flavors) == 0 {
+		return allFlavors
+	}
+
+	filteredFlavors := make([]flavors.Flavor, 0, len(allFlavors))
+	for i := range allFlavors {
+		var allowed bool
+		for _, flavorName := range h.Config.Flavors {
+			if flavorName == allFlavors[i].Name {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			log.Debug(context.TODO(), "initFlavors> flavor '%s' is not allowed", allFlavors[i].Name)
+			continue
+		}
+		filteredFlavors = append(filteredFlavors, allFlavors[i])
+	}
+	return filteredFlavors
+}
+
+func (h *HatcheryOpenstack) initNetworks() error {
+	all, err := tenantnetworks.List(h.openstackClient).AllPages()
+	if err != nil {
+		return sdk.WithStack(fmt.Errorf("initNetworks> Unable to get Network: %v", err))
+	}
+	nets, err := tenantnetworks.ExtractNetworks(all)
+	if err != nil {
+		return sdk.WithStack(fmt.Errorf("initNetworks> Unable to get Network: %v", err))
+	}
+	for _, n := range nets {
+		if n.Name == h.Config.NetworkString {
+			h.networkID = n.ID
+			break
+		}
+	}
+	return nil
+}
+
+func (h *HatcheryOpenstack) initImagesUsername(ctx context.Context) {
+	h.imagesUsername = make(map[*regexp.Regexp]string)
+
+	for _, override := range h.Config.OverrideImagesUsername {
+		h.imagesUsername[regexp.MustCompile(override.Image)] = override.Username
+	}
+}
+
+func (h *HatcheryOpenstack) initImagesBookDelay() {
+	h.imagesBookDelay = make(map[*regexp.Regexp]int64)
+
+	for _, override := range h.Config.OverrideImagesBookDelay {
+		h.imagesBookDelay[regexp.MustCompile(override.Image)] = override.Delay
+	}
+}
+
+func (h *HatcheryOpenstack) initImagesWorkerBasedir() {
+	h.imagesWorkerBasedir = make(map[*regexp.Regexp]string)
+
+	for _, override := range h.Config.OverrideImagesWorkerBasedir {
+		h.imagesWorkerBasedir[regexp.MustCompile(override.Image)] = override.Basedir
+		log.Info(context.Background(), "initImagesWorkerBasedir> registered worker basedir override: image=%q basedir=%q", override.Image, override.Basedir)
+	}
+	log.Info(context.Background(), "initImagesWorkerBasedir> %d worker basedir override(s) configured", len(h.imagesWorkerBasedir))
+}
+
+// initIPStatus initializes ipsInfos to
+// add workername on ip belong to openstack-ip-range
+// this func is called once, when hatchery is starting
+func (h *HatcheryOpenstack) initIPStatus(ctx context.Context) error {
+	srvs := h.getServers(ctx)
+	log.Info(ctx, "initIPStatus> %d srvs", len(srvs))
+	for ip := range ipsInfos.ips {
+		log.Info(ctx, "initIPStatus> checking %s", ip)
+		for _, s := range srvs {
+			if len(s.Addresses) == 0 {
+				log.Info(ctx, "initIPStatus> server %s - 0 addr", s.Name)
+				continue
+			}
+			for k, v := range s.Addresses {
+				if k != h.Config.NetworkString {
+					continue
+				}
+				switch v.(type) {
+				case []interface{}:
+					for _, z := range v.([]interface{}) {
+						var addr string
+						var version int
+						for x, y := range z.(map[string]interface{}) {
+							if x == "addr" {
+								addr = y.(string)
+							}
+							if x == "version" {
+								version = int(y.(float64))
+							}
+						}
+						//we only support IPV4
+						if addr != "" && version == 4 {
+							log.Debug(ctx, "initIPStatus> server %s - address %s (checking %s)", s.Name, addr, ip)
+							if addr != "" && addr == ip {
+								log.Info(ctx, "initIPStatus> worker %s - use IP: %s", s.Name, addr)
+								ipsInfos.ips[ip] = ipInfos{workerName: s.Name}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}

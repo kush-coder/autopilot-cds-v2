@@ -1,0 +1,59 @@
+<div class="svg-wrapper" #svgGraph tabindex="0" role="application"
+  aria-label="Workflow graph. Use arrow keys to move between jobs, Enter to open, Shift to select multiple."></div>
+<span aria-live="polite"
+  style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">{{liveAnnouncement}}</span>
+<span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">{{graphSummary}}</span>
+
+@if (_workflowRun) {
+  <div class="hooks">
+    @for (h of hooks; track h) {
+      @if (h === selectedHook || (selectedHook === 'scheduler' && h === 'schedule')) {
+        <div class="hook"
+          [class.active]="true" (click)="clickHook(h)" title="Show hook event">
+          <span nz-icon nzType="api" nzTheme="outline"></span>
+          Triggered by hook on&nbsp;<b>{{h}}</b>
+        </div>
+      }
+    }
+    @if (selectedHook === 'manual') {
+      <div class="hook" [class.active]="true" (click)="clickHook('manual')">
+        <span nz-icon nzType="api" nzTheme="outline"></span>
+        <b>Manual</b>&nbsp;trigger
+      </div>
+    }
+    @if (selectedHook === 'webhook') {
+      <div class="hook" [class.active]="true" (click)="clickHook('webhook')">
+        <span nz-icon nzType="api" nzTheme="outline"></span>
+        <b>Webhook</b>&nbsp;trigger
+      </div>
+    }
+  </div>
+}
+
+@if (!_workflowRun) {
+  <div class="hooks">
+    @for (h of hooks; track h) {
+      <div class="hook" (click)="clickHook(h)" title="Show hook configuration">
+        <span nz-icon nzType="api" nzTheme="outline"></span>
+        Hook on&nbsp;<b>{{h}}</b>
+      </div>
+    }
+  </div>
+}
+
+<div class="controls">
+  <button nz-button (click)="changeDirection()" nzSize="default"
+    [attr.aria-label]="direction === 'horizontal' ? 'Rotate graph right' : 'Rotate graph left'">
+    @if (direction === 'horizontal') {
+      <span nz-icon nzType="rotate-right" nzTheme="outline"
+      title="Rotate graph right"></span>
+    }
+    @if (direction === 'vertical') {
+      <span nz-icon nzType="rotate-left" nzTheme="outline"
+      title="Rotate graph left"></span>
+    }
+  </button>
+  <button nz-button (click)="clickOrigin()" nzSize="default" title="Center graph" aria-label="Center graph">
+    <span nz-icon nzType="aim" nzTheme="outline"></span>
+  </button>
+</div>

@@ -1,0 +1,80 @@
+@use "../../../common" as common;
+
+.workflow-page {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+
+    .workflow-wrapper {
+        flex: 1;
+        overflow: hidden;
+        display: flex;
+        flex-direction: row;
+    }
+}
+
+$sidebarWidth: 255px;
+
+.content-wrap,
+.sidebar {
+    transition: width 0.1s;
+}
+
+.sidebar {
+    width: $sidebarWidth;
+    height: 100%;
+}
+
+.content-wrap {
+    float: right;
+    width: calc(100% - #{$sidebarWidth});
+    height: 100%;
+    margin-left: 10px;
+
+    &.expanded {
+        width: 100%;
+    }
+
+    .open.button {
+        padding-left: -10px;
+        border-top-left-radius: 0px;
+        border-bottom-left-radius: 0px;
+        border-top-right-radius: 0px;
+        position: absolute;
+    }
+}
+
+.labelFeature {
+    margin-right: 10px;
+    cursor: pointer;
+
+    i {
+        margin-right: 5px;
+    }
+
+    &.preview {
+        margin-right: 20px;
+    }
+}
+
+app-favorite-button {
+    margin-right: 10px;
+}
+
+.infoPopup {
+    width: 450px;
+    word-break: break-word;
+
+    app-ascode-event {
+        min-height: 100px;
+    }
+
+    .footer {
+        display: flex;
+        align-items: center;
+
+        button {
+            margin-left: auto;
+        }
+    }
+}

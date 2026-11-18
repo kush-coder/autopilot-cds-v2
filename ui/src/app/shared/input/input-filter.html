@@ -1,0 +1,46 @@
+<input [placeholder]="placeholder" [attr.aria-label]="placeholder" nz-input [nzAutocomplete]="filterAutoComplete" [ngModel]="filterText"
+  [title]="filterText ? 'Search for ' + filterText : placeholder" (ngModelChange)="onFilterTextChange($event)"
+  #filterInput #filterInputDirective=nzAutocompleteTrigger (click)="onClickInput()" ngDefaultControl
+  [ngModelOptions]="{standalone: true}" />
+<nz-autocomplete nzBackfill #filterAutoComplete>
+  @if (!filterText || filterText.length > 0 && filterText[filterText.length-1] !== ':') {
+    <nz-auto-option
+      [nzLabel]="filterText" [nzValue]="filterText">
+      {{filterText ? filterText + ' - ' : ''}}submit
+    </nz-auto-option>
+  }
+  @if (suggestions && suggestions.length > 0) {
+    <nz-auto-optgroup nzLabel="Suggestions">
+      @for (option of suggestions; track option) {
+        <nz-auto-option [nzLabel]="'jump:' + option.key" [nzValue]="option.data">
+          @if (suggestionTemplate) {
+            <ng-container [ngTemplateOutlet]="suggestionTemplate"
+              [ngTemplateOutletContext]="{option: option}" />
+          }
+          @if (!suggestionTemplate) {
+            {{option.label}}
+          }
+        </nz-auto-option>
+      }
+    </nz-auto-optgroup>
+  }
+  @if (availableFilters.length > 0) {
+    <nz-auto-optgroup nzLabel="Narrow your search">
+      @for (filter of availableFilters; track filter) {
+        <nz-auto-option [nzLabel]="computeFilterValue(filter)"
+          [nzValue]="computeFilterValue(filter)"><b>{{filter.key}}:</b>
+          {{filter.example}}
+        </nz-auto-option>
+      }
+    </nz-auto-optgroup>
+  }
+  @if (selectedFilter && selectedFilter.options?.length > 0) {
+    <nz-auto-optgroup nzLabel="Narrow your search">
+      @for (option of selectedFilter.options; track option) {
+        <nz-auto-option [nzLabel]="computeFilterValue(selectedFilter, option)"
+          [nzValue]="computeFilterValue(selectedFilter, option)">{{selectedFilter.key}}:{{option}}
+        </nz-auto-option>
+      }
+    </nz-auto-optgroup>
+  }
+</nz-autocomplete>

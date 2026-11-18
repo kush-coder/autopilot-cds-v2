@@ -1,0 +1,7 @@
+name: ITSCWRKFLW15-WORKFLOW
+version: v2.0
+workflow:
+  root:
+    pipeline: ITSCWRKFLW15-PIPELINE
+    application: ITSCWRKFLW15-APPLICATION
+    integration: simple-integration-dev

@@ -1,0 +1,29 @@
+<app-tabs [tabs]="tabs" (onSelect)="selectTab($event)"></app-tabs>
+
+@if (selectedTab) {
+  <div class="content">
+    @switch (selectedTab.key) {
+      @case ('variables') {
+        <app-project-variable-sets [project]="project"></app-project-variable-sets>
+      }
+      @case ('concurrencies') {
+        <app-project-concurrencies [project]="project"></app-project-concurrencies>
+      }
+      @case ('webhooks') {
+        <app-project-webhooks [project]="project"></app-project-webhooks>
+      }
+      @case ('keys') {
+        <app-project-keys [project]="project"></app-project-keys>
+      }
+      @case ('retentions') {
+        <app-project-run-retention [project]="project"></app-project-run-retention>
+      }
+      @case ('integrations') {
+        <app-project-integrations [project]="project"></app-project-integrations>
+      }
+      @case ('advanced') {
+        <app-project-advanced [project]="project"></app-project-advanced>
+      }
+    }
+  </div>
+}

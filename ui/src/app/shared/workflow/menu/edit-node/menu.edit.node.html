@@ -1,0 +1,95 @@
+@if (workflow) {
+  <ul>
+    @if (workflowrun) {
+      <li>
+        <a appClickable (click)="sendEvent('run')" [class.disabled]="!runnable">
+          Run pipeline
+        </a>
+      </li>
+      <hr>
+      }
+      @if (node && !workflowrun) {
+        <li>
+          <a appClickable (click)="sendEvent('pipeline')"
+            [class.disabled]="readonly">
+            Add a pipeline
+          </a>
+        </li>
+        <li>
+          <a appClickable (click)="sendEvent('parent')"
+            [class.disabled]="workflow.workflow_data.node.id !== node.id || readonly">
+            Add a parent pipeline
+          </a>
+        </li>
+        <li>
+          <a appClickable (click)="sendEvent('fork')" [class.disabled]="readonly">
+            Add a fork
+          </a>
+        </li>
+        <li>
+          <a appClickable (click)="sendEvent('join')" [class.disabled]="readonly">
+            Add a join
+          </a>
+        </li>
+        <li>
+          <a appClickable (click)="sendEvent('join_link')" [class.disabled]="readonly">
+            Link to a join
+          </a>
+        </li>
+        <hr>
+          <li>
+            <a appClickable (click)="sendEvent('hook')"
+              [class.disabled]="!workflow.workflow_data || workflow.workflow_data.node.id !== node.id || readonly">
+              Add a hook
+            </a>
+          </li>
+          <li>
+            <a appClickable (click)="sendEvent('outgoinghook')" [class.disabled]="readonly">
+              Add an outgoing hook
+            </a>
+          </li>
+          <hr>
+            <li>
+              <a class="item" appClickable (click)="sendEvent('edit')">
+                @if (readonly) {
+                  <span>Show context configuration</span>
+                }
+                @if (!readonly) {
+                  <span>Edit the context</span>
+                }
+              </a>
+            </li>
+            @if (node.type === 'pipeline' && workflow && workflow.pipelines && node && node.context && workflow.pipelines[node.context.pipeline_id]) {
+              <li>
+                <a [routerLink]="['/project', project.key, 'pipeline', workflow.pipelines[node.context.pipeline_id].name]"
+                  [queryParams]="{workflow: workflow.name}">
+                  Edit the pipeline
+                </a>
+              </li>
+            }
+            <hr>
+              <li>
+                @if (!readonly && node.id !== workflow.workflow_data.node.id) {
+                  <a appClickable (click)="sendEvent('delete')">
+                    Delete
+                  </a>
+                }
+              </li>
+            }
+            @if (node && noderun && node.type === 'pipeline') {
+              <li>
+                <a appClickable (click)="sendEvent('logs')">
+                  Display logs
+                </a>
+              </li>
+              <hr>
+              }
+              @if (node && workflowrun) {
+                <li>
+                  <a appClickable (click)="sendEvent('edit')">
+                    Show context configuration
+                  </a>
+                </li>
+              }
+            </ul>
+          }

@@ -1,0 +1,15 @@
+nz-select {
+  width: 100%;
+}
+
+nz-col {
+  button {
+    float: right;
+  }
+}
+
+.footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

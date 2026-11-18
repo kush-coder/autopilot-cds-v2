@@ -1,0 +1,46 @@
+<div id="projectRepoManagers">
+  <div class="list-header">
+    @if (canAdd) {
+      <button nz-button nzType="primary" (click)="openCreate()">
+        <i nz-icon nzType="plus" aria-hidden="true"></i> Add
+      </button>
+    }
+  </div>
+  <nz-table [nzData]="vcsProjects" nzSize="small" [nzLoading]="loading" #listrepos>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Type</th>
+        <th>URL</th>
+        <th nzWidth="80px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      @for (r of listrepos.data; track r) {
+        <tr>
+          <td>
+            {{r.name}}
+            @if (r.created_by && r.created_by !== '') {
+              <span> - Created by {{r.created_by}}</span>
+            }
+          </td>
+          <td>{{r.type}}</td>
+          <td>{{r.url}}</td>
+          <td class="rightAlign">
+            <button nz-button nzType="text" (click)="openEdit(r)" title="Edit" aria-label="Edit repository manager {{r.name}}">
+              <i nz-icon nzType="edit" aria-hidden="true"></i>
+            </button>
+          </td>
+        </tr>
+      }
+    </tbody>
+  </nz-table>
+  @if (selectedVCSProject) {
+    <app-project-repomanager-form
+      [project]="project"
+      [vcsProject]="selectedVCSProject"
+      [visible]="modalVisible"
+      (closed)="onModalClose($event)">
+    </app-project-repomanager-form>
+  }
+</div>

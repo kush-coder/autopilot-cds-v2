@@ -1,0 +1,297 @@
+package openstack
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"fmt"
+	"math"
+	"strings"
+	"text/template"
+	"time"
+
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/flavors"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
+	"github.com/rockbears/log"
+
+	"github.com/ovh/cds/sdk"
+	"github.com/ovh/cds/sdk/hatchery"
+)
+
+// SpawnWorker creates a new cloud instances
+// requirements are not supported
+func (h *HatcheryOpenstack) SpawnWorker(ctx context.Context, spawnArgs hatchery.SpawnArguments) error {
+	if spawnArgs.JobID != "0" {
+		log.Debug(ctx, "spawnWorker> spawning worker %s model:%s for job %s", spawnArgs.WorkerName, spawnArgs.Model.GetName(), spawnArgs.JobID)
+	} else {
+		log.Debug(ctx, "spawnWorker> spawning worker %s model:%s", spawnArgs.WorkerName, spawnArgs.Model.GetName())
+	}
+
+	if spawnArgs.JobID == "0" && !spawnArgs.RegisterOnly {
+		return sdk.WithStack(fmt.Errorf("no job ID and no register"))
+	}
+
+	// Map the CDS size to the correct openstack flavor
+	flavorName := h.getFlavorName(spawnArgs.Model.GetFlavor(spawnArgs.Requirements, h.Config.DefaultFlavor))
+
+	// Get flavor for target model
+	flavor, err := h.flavor(flavorName)
+	if err != nil {
+		return err
+	}
+
+	if sdk.IsValidUUID(spawnArgs.JobID) {
+		flavorInfo := sdk.V2SendJobRunInfo{
+			Level:   sdk.WorkflowRunInfoLevelInfo,
+			Time:    time.Now(),
+			Message: fmt.Sprintf("worker %q will use the flavor %q", spawnArgs.WorkerName, flavorName),
+		}
+		if err = h.CDSClientV2().V2QueuePushJobInfo(ctx, spawnArgs.Region, spawnArgs.JobID, flavorInfo); err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+		}
+	} else {
+		msg := sdk.SpawnMsg{
+			ID: sdk.MsgSpawnInfoHatcheryStartsFlavor.ID,
+			Args: []interface{}{
+				spawnArgs.WorkerName,
+				flavorName,
+			},
+		}
+		infos := []sdk.SpawnInfo{{RemoteTime: time.Now(), Message: msg}}
+		if err := h.CDSClient().QueueJobSendSpawnInfo(ctx, spawnArgs.JobID, infos); err != nil {
+			log.Warn(ctx, "SpawnWorker> cannot client.sendSpawnInfo for job %d: %s", spawnArgs.JobID, err)
+		}
+	}
+	if err := h.checkSpawnLimits(ctx, flavor, spawnArgs.Model); err != nil {
+		ctx = sdk.ContextWithStacktrace(ctx, err)
+		log.Error(ctx, err.Error())
+		return nil
+	}
+
+	// Get image ID
+	imageID, err := h.imageID(ctx, spawnArgs.Model.GetOpenstackImage())
+	if err != nil {
+		return err
+	}
+
+	var withExistingImage bool
+	if spawnArgs.Model.ModelV1 == nil || (!spawnArgs.Model.ModelV1.NeedRegistration && !spawnArgs.RegisterOnly) {
+		start := time.Now()
+		imgs := h.getImages(ctx)
+		log.Debug(ctx, "spawnWorker> call images.List on openstack took %fs, nbImages:%d", time.Since(start).Seconds(), len(imgs))
+		for _, img := range imgs {
+			if !strings.HasPrefix(img.Name, "cds_image") {
+				continue
+			}
+			workerModelName := img.Metadata["worker_model_name"] // Temporary check on name for old registred model but new snapshot will only have path
+			workerModelPath := img.Metadata["worker_model_path"]
+			workerModelLastModified := img.Metadata["worker_model_last_modified"]
+			nameOrPathMatch := (workerModelName != "" && workerModelName == spawnArgs.Model.GetName()) || workerModelPath == spawnArgs.Model.GetFullPath()
+			if nameOrPathMatch && fmt.Sprintf("%s", workerModelLastModified) == spawnArgs.Model.GetLastModified() {
+				withExistingImage = true
+				imageID = img.ID
+				break
+			}
+		}
+	}
+	workerConfig := h.GenerateWorkerConfig(ctx, h, spawnArgs)
+	openstackImage := spawnArgs.Model.GetOpenstackImage()
+	if basedir := h.GetImageWorkerBasedir(ctx, openstackImage); basedir != "" {
+		log.Info(ctx, "SpawnWorker> overriding worker basedir for image %q: %q -> %q", openstackImage, workerConfig.Basedir, basedir)
+		workerConfig.Basedir = basedir
+		hatcheryBasedirInfo := sdk.V2SendJobRunInfo{
+			Level:   sdk.WorkflowRunInfoLevelInfo,
+			Time:    time.Now(),
+			Message: fmt.Sprintf("Hatchery %q is configured to use the worker basedir '%s' for this worker", h.Name(), basedir),
+		}
+		if err := h.CDSClientV2().V2QueuePushJobInfo(ctx, spawnArgs.Region, spawnArgs.JobID, hatcheryBasedirInfo); err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+		}
+	} else {
+		log.Info(ctx, "SpawnWorker> no worker basedir override for image %q, keeping basedir %q", openstackImage, workerConfig.Basedir)
+	}
+
+	udataParam := struct {
+		// All fields below are deprecated
+		API               string `json:"api"`
+		Token             string `json:"token"`
+		Name              string `json:"name"`
+		BaseDir           string `json:"base_dir"`
+		HTTPInsecure      bool   `json:"http_insecure"`
+		Model             string `json:"model"`
+		HatcheryName      string `json:"hatchery_name"`
+		WorkflowJobID     int64  `json:"workflow_job_id"`
+		TTL               int    `json:"ttl"`
+		FromWorkerImage   bool   `json:"from_worker_image"`
+		GraylogHost       string `json:"graylog_host"`
+		GraylogPort       int    `json:"graylog_port"`
+		GraylogExtraKey   string `json:"graylog_extra_key"`
+		GraylogExtraValue string `json:"graylog_extra_value"`
+		WorkerBinary      string
+		InjectEnvVars     map[string]string `json:"inject_env_vars"`
+		// All fields above are deprecated
+		Config string
+	}{
+		API:             workerConfig.APIEndpoint,
+		FromWorkerImage: withExistingImage,
+		Config:          workerConfig.EncodeBase64(),
+	}
+
+	udata64, err := h.prepareUserData(ctx, spawnArgs, udataParam)
+	if err != nil {
+		return err
+	}
+
+	// Create openstack vm
+	meta := map[string]string{
+		"worker":                     spawnArgs.WorkerName,
+		"hatchery_name":              h.Name(),
+		"register_only":              fmt.Sprintf("%t", spawnArgs.RegisterOnly),
+		"flavor":                     flavorName,
+		"model":                      spawnArgs.Model.GetOpenstackImage(),
+		"worker_model_path":          spawnArgs.Model.GetFullPath(),
+		"worker_model_last_modified": spawnArgs.Model.GetLastModified(),
+	}
+
+	maxTries := 3
+	for try := 1; try <= maxTries; try++ {
+		// Ip len(ipsInfos.ips) > 0, specify one of those
+		var ip string
+		if len(ipsInfos.ips) > 0 {
+			var errai error
+			ip, errai = h.findAvailableIP(ctx, spawnArgs.WorkerName)
+			if errai != nil {
+				return errai
+			}
+			log.Debug(ctx, "Found %s as available IP", ip)
+		}
+
+		networks := []servers.Network{{UUID: h.networkID, FixedIP: ip}}
+		opts := servers.CreateOpts{
+			Name:      spawnArgs.WorkerName,
+			FlavorRef: flavor.ID,
+			ImageRef:  imageID,
+			Metadata:  meta,
+			UserData:  []byte(udata64),
+			Networks:  networks,
+		}
+		if len(h.Config.DefaultSecurityGroups) > 0 {
+			opts.SecurityGroups = h.Config.DefaultSecurityGroups
+		}
+		r := servers.Create(h.openstackClient, opts)
+
+		server, err := r.Extract()
+		if err != nil {
+			if strings.Contains(err.Error(), "is already in use on instance") && try < maxTries { // Fixed IP address X.X.X.X is already in use on instance
+				log.Warn(ctx, "SpawnWorker> Unable to create server: name:%s flavor:%s image:%s metadata:%v networks:%s err:%v body:%s - Try %d/%d", spawnArgs.WorkerName, flavor.ID, imageID, meta, networks, err, r.Body, try, maxTries)
+				continue
+			}
+			return fmt.Errorf("SpawnWorker> Unable to create server: name:%s flavor:%s image:%s metadata:%v networks:%s err:%v body:%s", spawnArgs.WorkerName, flavor.ID, imageID, meta, networks, err, r.Body)
+		}
+		log.Debug(ctx, "SpawnWorker> Created Server ID: %s", server.ID)
+		break
+	}
+	return nil
+}
+
+func (h *HatcheryOpenstack) getFlavorName(flavorFromJob string) string {
+	flavorName, has := h.Config.Flavors[strings.ToLower(flavorFromJob)]
+	if !has {
+		// Check in old mapping for backward compatibility
+		cdsSize, has := h.Config.OldFlavorsMapping[flavorFromJob]
+		if !has {
+			return h.getFlavorName(h.Config.DefaultFlavor)
+		}
+		flavorName = h.Config.Flavors[strings.ToLower(cdsSize)]
+		log.Debug(context.Background(), "flavor %q replaced by %q", flavorFromJob, flavorName)
+	}
+	return flavorName
+}
+
+func (h *HatcheryOpenstack) checkSpawnLimits(ctx context.Context, flavor flavors.Flavor, model sdk.WorkerStarterWorkerModel) error {
+	existingServers := h.getServers(ctx)
+	// MaxWorker=0 means unlimited (Amendment B for vSphere hatchery)
+	if h.Configuration().Provision.MaxWorker > 0 && len(existingServers) >= h.Configuration().Provision.MaxWorker {
+		return sdk.WithStack(fmt.Errorf("MaxWorker limit (%d) reached", h.Configuration().Provision.MaxWorker))
+	}
+
+	// If a max CPUs count is set in configuration we will check that there are enough CPUs available to spawn the model
+	var totalCPUsUsed int
+	if h.Config.MaxCPUs > 0 {
+		for i := range existingServers {
+			flavorName := existingServers[i].Metadata["flavor"]
+			flavor, err := h.flavor(flavorName)
+			if err == nil {
+				totalCPUsUsed += flavor.VCPUs
+			}
+		}
+		if totalCPUsUsed+flavor.VCPUs > h.Config.MaxCPUs {
+			return sdk.WithStack(fmt.Errorf("MaxCPUs limit (%d) reached", h.Config.MaxCPUs))
+		}
+	}
+
+	// If the CountSmallerFlavorToKeep is set in config, we should check that there will be enough CPUs to spawn a smaller flavor after this one
+	if h.Config.MaxCPUs > 0 && h.Config.CountSmallerFlavorToKeep > 0 {
+		smallerFlavor := h.getSmallerFlavorThan(flavor)
+		// If same id, means that the requested flavor is the smallest one so we want to start it.
+		log.Debug(ctx, "checkSpawnLimits> smaller flavor found for %s is %s", flavor.Name, smallerFlavor.Name)
+		if smallerFlavor.ID != flavor.ID {
+			minCPUsNeededToStart := flavor.VCPUs + h.Config.CountSmallerFlavorToKeep*smallerFlavor.VCPUs
+			countCPUsLeft := int(math.Max(.0, float64(h.Config.MaxCPUs-totalCPUsUsed))) // Set zero as min value in case that the limit changed and count of used greater than max count
+			if minCPUsNeededToStart > countCPUsLeft {
+				return sdk.WithStack(fmt.Errorf("CountSmallerFlavorToKeep limit reached, can't start model %s with flavor %s that requires %d CPUs. Smaller flavor is %s and need %d CPUs. There are currently %d/%d left CPUs",
+					model.GetFullPath(), flavor.Name, flavor.VCPUs, smallerFlavor.Name, smallerFlavor.VCPUs, countCPUsLeft, h.Config.MaxCPUs))
+			}
+			log.Debug(ctx, "checkSpawnLimits> %d/%d CPUs left is enough to start model %s with flavor %s that require %d CPUs",
+				countCPUsLeft, h.Config.MaxCPUs, model.GetFullPath(), flavor.Name, flavor.VCPUs)
+		}
+	}
+
+	return nil
+}
+
+func (h *HatcheryOpenstack) prepareUserData(ctx context.Context, spawnArgs hatchery.SpawnArguments, udataParam any) (string, error) {
+	var cmdPrefix string
+	if cmdUsername := h.GetImageUsername(ctx, spawnArgs.Model.GetOpenstackImage()); cmdUsername != "" {
+		cmdPrefix = fmt.Sprintf("sudo -u %s -i ", cmdUsername)
+		hatcheryTakeInfo := sdk.V2SendJobRunInfo{
+			Level:   sdk.WorkflowRunInfoLevelInfo,
+			Time:    time.Now(),
+			Message: fmt.Sprintf("Hatchery %q is configured to use the username '%s' for this worker", h.Name(), cmdUsername),
+		}
+		if err := h.CDSClientV2().V2QueuePushJobInfo(ctx, spawnArgs.Region, spawnArgs.JobID, hatcheryTakeInfo); err != nil {
+			log.ErrorWithStackTrace(ctx, err)
+		}
+	}
+
+	var cmdSuffix string
+	if spawnArgs.RegisterOnly {
+		cmdSuffix = " --config {{.Config}} register"
+	} else {
+		cmdSuffix += " --config {{.Config}}"
+	}
+
+	var keyInject string
+	if len(h.Config.InjectSSHPublicKeys) > 0 {
+		keyInject += "mkdir -p /root/.ssh\n"
+		for _, k := range h.Config.InjectSSHPublicKeys {
+			keyInject += "echo '" + k + "' >> /root/.ssh/authorized_keys\n"
+		}
+		keyInject += "chmod 600 /root/.ssh/authorized_keys\n"
+	}
+
+	udata := spawnArgs.Model.GetPreCmd() + "\n" + keyInject + cmdPrefix + spawnArgs.Model.GetCmd() + cmdSuffix + "\n" + spawnArgs.Model.GetPostCmd()
+	tmpl, err := template.New("udata").Parse(udata)
+	if err != nil {
+		return "", err
+	}
+
+	var buffer bytes.Buffer
+	if err := tmpl.Execute(&buffer, udataParam); err != nil {
+		return "", err
+	}
+
+	udata64 := base64.StdEncoding.EncodeToString(buffer.Bytes())
+
+	return udata64, nil
+}

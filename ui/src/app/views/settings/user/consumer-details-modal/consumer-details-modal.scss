@@ -1,0 +1,21 @@
+@use '../../../../../common' as common;
+
+nz-row {
+  margin-top: 10px;
+}
+
+.floatRight {
+  float: right;
+}
+
+button.floatRight {
+  margin-right: 10px;
+}
+
+nz-form-label {
+  font-weight: bold;
+}
+
+i.orange {
+  color: common.$cds_color_orange;
+}

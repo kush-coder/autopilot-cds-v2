@@ -1,0 +1,101 @@
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, inject, Input, OnChanges, OnInit, SimpleChanges } from '@angular/core';
+import { Router } from '@angular/router';
+import { Store } from '@ngxs/store';
+import { APIConfig } from 'app/model/config.service';
+import { Project } from 'app/model/project.model';
+import { V2ProjectService } from 'app/service/projectv2/project.service';
+import { ConfigState } from 'app/store/config.state';
+import { lastValueFrom } from 'rxjs';
+import { SetCurrentProjectV2 } from 'app/store/project-v2.action';
+import { NzMessageService } from 'ng-zorro-antd/message';
+import { ErrorUtils } from 'app/shared/error.utils';
+import { FormBuilder, FormControl, FormGroup, Validators } from '@angular/forms';
+
+@Component({
+    standalone: false,
+    selector: 'app-project-advanced',
+    templateUrl: './project.advanced.html',
+    styleUrls: ['./project.advanced.scss'],
+    changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class ProjectAdvancedComponent implements OnInit, OnChanges {
+    @Input() project: Project;
+
+    loading = false;
+    fileTooLarge = false;
+    apiConfig: APIConfig;
+    validateForm: FormGroup<{
+        name: FormControl<string | null>;
+        description: FormControl<string | null>;
+    }>;
+
+    private _v2ProjectService = inject(V2ProjectService)
+    public _messageService = inject(NzMessageService)
+    private _router = inject(Router)
+    private _store = inject(Store)
+    private _cd = inject(ChangeDetectorRef)
+    private _fb = inject(FormBuilder)
+
+    constructor() {
+        this.validateForm = this._fb.group({
+            name: this._fb.control<string | null>(null, Validators.required),
+            description: this._fb.control<string | null>(null)
+        });
+    }
+
+    ngOnInit(): void {
+        if (!this.project.permissions.writable) {
+            this._router.navigate(['/project', this.project.key]);
+        }
+        this.apiConfig = this._store.selectSnapshot(ConfigState.api);
+    }
+
+    ngOnChanges(changes: SimpleChanges): void {
+        this.validateForm.controls.name.setValue(this.project.name);
+        this.validateForm.controls.description.setValue(this.project.description);
+    }
+
+    async onSubmitProjectUpdate() {
+        this.fileTooLarge = false;
+        if (!this.validateForm.valid) {
+            Object.values(this.validateForm.controls).forEach(control => {
+                if (control.invalid) {
+                    control.markAsDirty();
+                    control.updateValueAndValidity({ onlySelf: true });
+                }
+            });
+            return;
+        }
+        this.validateForm.disable();
+        this.loading = true;
+        this._cd.markForCheck();
+        try {
+            const p = await lastValueFrom(this._v2ProjectService.put({
+                ...this.project,
+                name: this.validateForm.value.name,
+                description: this.validateForm.value.description,
+            }));
+            this._store.dispatch(new SetCurrentProjectV2(p));
+            this._messageService.success('Project updated');
+        } catch (e) {
+            this._messageService.error(`Unable to update project: ${ErrorUtils.print(e)}`, { nzDuration: 2000 });
+        }
+        this.loading = false;
+        this.validateForm.enable();
+        this._cd.markForCheck();
+    }
+
+    async deleteProject() {
+        this.loading = true;
+        this._cd.markForCheck();
+        try {
+            await lastValueFrom(this._v2ProjectService.delete(this.project.key));
+            this._messageService.success('Project deleted');
+            this._router.navigate(['/']);
+        } catch (e) {
+            this._messageService.error(`Unable to delete project: ${ErrorUtils.print(e)}`, { nzDuration: 2000 });
+        }
+        this.loading = false;
+        this._cd.markForCheck();
+    }
+}

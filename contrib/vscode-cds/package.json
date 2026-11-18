@@ -1,0 +1,205 @@
+{
+  "name": "vscode-cds",
+  "publisher": "OVHcloud",
+  "displayName": "CDS",
+  "description": "CDS VSCode Extension",
+  "version": "0.0.0",
+  "engines": {
+    "vscode": "^1.93.1"
+  },
+  "repository": {
+    "url": "https://github.com/ovh/cds"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "cds",
+    "cdsctl"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vscode-cds-explorer",
+          "title": "CDS",
+          "icon": "assets/images/cds.svg"
+        }
+      ]
+    },
+    "views": {
+      "vscode-cds-explorer": [
+        {
+          "id": "vscode-cds-workflows",
+          "name": "Workflow Explorer"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vscode-cds.clearCache",
+        "title": "Clear the cache",
+        "category": "CDS"
+      },
+      {
+        "command": "vscode-cds.setCurrentContext",
+        "title": "Change the CDS context",
+        "category": "CDS"
+      },
+      {
+        "command": "vscode-cds.setCurrentProject",
+        "title": "Set the CDS context for the current repository",
+        "category": "CDS"
+      },
+      {
+        "command": "vscode-cds.previewWorkflow",
+        "title": "Preview the CDS workflow",
+        "category": "CDS",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "vscode-cds.refreshWorkflowView",
+        "title": "Refresh",
+        "category": "CDS",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vscode-cds.triggerWorkflow",
+        "title": "Trigger Workflow Run",
+        "category": "CDS",
+        "icon": "$(play)"
+      },
+      {
+        "command": "vscode-cds.stopRun",
+        "title": "Stop Run",
+        "category": "CDS",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "vscode-cds.restartRun",
+        "title": "Restart Run",
+        "category": "CDS",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "vscode-cds.viewRunLogs",
+        "title": "Download Run Logs",
+        "category": "CDS",
+        "icon": "$(output)"
+      },
+      {
+        "command": "vscode-cds.refreshRuns",
+        "title": "Refresh Runs",
+        "category": "CDS",
+        "icon": "$(sync)"
+      }
+    ],
+    "configuration": {
+      "title": "CDS",
+      "type": "object",
+      "properties": {
+        "cds.config": {
+          "type": "string",
+          "default": "~/.cdsrc",
+          "markdownDescription": "The CDS configuration file (.cdsrc)."
+        },
+        "cds.logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "error"
+          ],
+          "default": "info",
+          "markdownDescription": "Logging for CDS extension. The log is emitted to the output channel named as CDS."
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "vscode-cds.previewWorkflow",
+          "when": "isCDSWorkflowFile",
+          "alt": "vscode-cds.previewWorkflow",
+          "group": "navigation"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "vscode-cds.refreshWorkflowView",
+          "when": "view == vscode-cds-workflows",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vscode-cds.triggerWorkflow",
+          "when": "view == vscode-cds-workflows && viewItem == cdsWorkflow",
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-cds.stopRun",
+          "when": "view == vscode-cds-workflows && viewItem == cdsRunBuilding",
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-cds.restartRun",
+          "when": "view == vscode-cds-workflows && viewItem =~ /cdsRunFailed|cdsRunDone/",
+          "group": "inline@2"
+        },
+        {
+          "command": "vscode-cds.viewRunLogs",
+          "when": "view == vscode-cds-workflows && viewItem =~ /cdsRun/",
+          "group": "inline@3"
+        },
+        {
+          "command": "vscode-cds.refreshRuns",
+          "when": "view == vscode-cds-workflows && viewItem == cdsWorkflow",
+          "group": "inline@4"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "vscode-cds.previewWorkflow",
+        "key": "shift+ctrl+v",
+        "mac": "shift+cmd+v",
+        "when": "isCDSWorkflowFile"
+      }
+    ]
+  },
+  "extensionDependencies": [
+    "redhat.vscode-yaml"
+  ],
+  "scripts": {
+    "ng": "ng",
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "vscode-test",
+    "vsce": "vsce"
+  },
+  "dependencies": {
+    "vscode-uri": "3.0.8",
+    "vscode-messenger": "0.4.5",
+    "vscode-messenger-common": "0.4.5"
+  },
+  "devDependencies": {
+    "@types/mocha": "10.0.8",
+    "@types/node": "22.x",
+    "@types/vscode": "1.93.0",
+    "@typescript-eslint/eslint-plugin": "8.7.0",
+    "@typescript-eslint/parser": "8.7.0",
+    "@vscode/test-cli": "0.0.10",
+    "@vscode/test-electron": "2.4.1",
+    "@vscode/vsce": "3.1.0",
+    "eslint": "9.11.1",
+    "typescript": "5.6.2"
+  }
+}

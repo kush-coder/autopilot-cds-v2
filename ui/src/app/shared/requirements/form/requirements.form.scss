@@ -1,0 +1,24 @@
+@use '../../../../common' as common;
+
+nz-form-item {
+  padding-left: 15px;
+
+  nz-select {
+    width: 100%;
+  }
+}
+
+.content {
+  padding-left: 15px;
+  padding-right: 15px;
+}
+
+i.green {
+  color: common.$cds_color_green;
+}
+i.red {
+  color: common.$cds_color_red;
+}
+i.orange {
+  color: common.$cds_color_orange;
+}

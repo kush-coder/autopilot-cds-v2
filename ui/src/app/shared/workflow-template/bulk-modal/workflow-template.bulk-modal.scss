@@ -1,0 +1,18 @@
+@use '../../../../common' as common;
+.content {
+    ::ng-deep {
+        .ui.table {
+            thead {
+                th {
+                    background-color: white !important;
+                }
+            }
+            tfoot {
+                background-color: white !important;
+            }
+        }
+    }
+  nz-row {
+    margin-bottom: 20px;
+  }
+}

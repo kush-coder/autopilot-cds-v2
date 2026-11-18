@@ -1,0 +1,3769 @@
+package api
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"encoding/base64"
+	"fmt"
+
+	"github.com/ovh/cds/engine/api/project"
+	"github.com/ovh/cds/engine/api/workflow_v2"
+
+	"io"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+
+	"github.com/ovh/cds/engine/api/entity"
+	"github.com/ovh/cds/engine/api/link"
+	"github.com/ovh/cds/engine/api/repository"
+	"github.com/ovh/cds/engine/api/services"
+	"github.com/ovh/cds/engine/api/services/mock_services"
+	"github.com/ovh/cds/engine/api/test/assets"
+	"github.com/ovh/cds/engine/api/user"
+	"github.com/ovh/cds/engine/api/vcs"
+	"github.com/ovh/cds/engine/gorpmapper"
+	"github.com/ovh/cds/engine/test"
+	"github.com/ovh/cds/sdk"
+)
+
+// Shared GPG test fixtures: a signed commit signature and the public key whose
+// key ID (F344BDDCE15F17D7) it advertises, reused across the analyze tests.
+const (
+	testGPGPublicKey = `-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mQINBFXv+IMBEADYp5xTZ0YKvUgXvvE0SSeXg+bo8mPTTq5clIYWfdmfVjS6NL8T
+IYhnjj5MXXIoGs/Lyx+B0VUC9Jo5ObSVCViJRXGVwfHpMIW2+n4i251pGO4bUPPw
+o7SpEbvEc1tqE4P3OU26BZhZoIv3AaslMXi+v2eZjJe5Qr4BSc6FLOo5pdAm9HAZ
+7vkj7M/WKbbpoXKpfZF+DLmJsrWU/2/TVD2ZdLANAwiXSVLmLeJr0z/zVX+9o6b9
+Rz7HV3euPDCWb/t2fEI4yT8+e92QlxCtVcMpG7ZpxftQbl4z0U8kHASr38UqjTL5
+VtCHKUFD5KyrxHUxFEUingI+M8NstzObho65oK2yxzcoufHTQBo2sfL4xWqPmFj8
+hZeNSz3P6XPLQ+wdIganRGweEv+LSpbSMXIaWpiE2GjwFVRRTaffCgWvth1JRBti
+deJI5rxe7UztytDTg8Ekt5MAqTBIoxqZ24zOdbxEef4EpEiYnaa5GXMg8EHH1bJr
+aIc2nuY7Zfoz7uvqS8F5ohh69q/LbSv+gxw7aU36oogd13+8/MYPE29vfb+tIIwz
+xen0PUcPkt83EQ0RdTbG7AnrvNMXDINp+ZGz3Oks3OXehezX/syPAe7BunPU/Zfy
+wK/GDhpjsS9R+y/ZWDXX/LyQfHiHw5nIoX0m6I43BdshrQH5fyrTvJA02wARAQAB
+tCxTdGV2ZW4gR3VpaGV1eCA8c3RldmVuLmd1aWhldXhAY29ycC5vdmguY29tPokC
+OAQTAQIAIgUCVe/4gwIbAwYLCQgHAwIGFQgCCQoLBBYCAwECHgECF4AACgkQ80S9
+3OFfF9dDYw//VuE85jnUS6bFwdvkFtdbXPZxOsFDMX9tiCjYDdXfT+98AoGgZboC
+Ya/E8T5NhFjG8yGC8WOsiZZhQ/DyFr7TT+CwLvZ2JmLarEKHpL//YNr5ACp7Q8lo
+7PSAACEJx2J3s2qpEbpMrvXVOJkAbwiFUnSz8R14RMJZLCmgbA5CDKpYqCSM/1B1
+ED/WY8phhV6GknsqvG/cQiyQNQBg8PEdsyiNn79QWRGD8q5ZvWsxAuMMY7j/WSLy
+VHZJ9wR9lBM9Lf3NJ+vDoVq56WaAH30vuVJ2LzGwHOULDKSFkQZ1JPodsu+7tDAZ
+QDENAMaD1940GzmBANH/FOHD5T2VrOYMtPHMcyXJRSUOgw3MtvSuKJJliLMO0DNa
+EZG14nCcdDP7xoS9da2JddMxDmqhzuCpsPk0IVH+JSjrAKOJ7r5YE3/vWcI2dQaU
+nOYBhqST73RN2g6wF5xLt9Oi1DXYFBfdhz+oXJ1ck34MB3oPx5yzlY9Rp7N5F9a+
+gDiuE1Y1iqRX0uuoDq8b2EsZrQ4dSvpjZwWYRsDghjSATjiAcrhC70NjpG22Avwt
+0x3SPG+HQYgzYs9idQMI6lpKqoFU9QUHMsWQKuBFE0ZXJs9Q9d+zjjUCebFZ7LjN
+twZyhn8QXg5FUhLygfF6Pq8jnYMXMzAbKXm3NEC8X1/VGaZjB1Lszcq5Ag0EVe/4
+gwEQAMGVA4T9qs/a8zy10Tc8nSGAMdNzI26D0fhH2rRtjeNJs5BqGNMPu2Eg5DKR
+7rStsw58fDvdKeB116ZPXq4Hoe66H+Pw83QIwDQk/vN965fPwqz9BIgDE/xTx09w
+wVLvfKAHIFQF7znqqUYrES2gYpvirVD7knGKjVMMkB4Hil7TMcya6MTD2a9L32be
+nMfZ5sA4311TJPS+kIEeEuG+SU2w3i6YRho+atUvsxkMNzmx92ow6JDznX8Kpbr/
+PVExZObUW0+379yMKlgaZLhrgqbcwm+IOCgsM5XSs/zGb2AFACADnOdqOYToRtIt
+bdvH2Y/2fq3t3upuzbpM3fiUu0Vs2rVRe5w4luHt6ZpKdZo43blEL9MN/ZbQVYE0
+N/5/9SAizfyyOGmrNvB4EwPLpyImBre9MRcZJRvg22tFxcbnM2+SJGwfmD0FnPGe
+gIRihPgsQxrx6BOCB1JzCUCOUqZ12gy2ul2RuopGEEX8YKLWNryNN8v0ooS+PU8D
+Ii2biB9O9UYecXPVhxVP64gl48lN8psIFL+YSJ+svAErsQYGASApRF240Nor98+L
+zgHm1+60JNU1i5gYQV6RzDMUML43XYWxsVqA21mTZZSJFwC/TcmLDl9yGyIOTNG4
+kFPT/c1xibi5MGBQE8gIxdwEwfrj9iqohMt8afJfIMhcfwdzABEBAAGJAh8EGAEC
+AAkFAlXv+IMCGwwACgkQ80S93OFfF9ceWxAAprlvofJ8qkREkhNznF9YacuDru8n
+8BfWINLHKMI8zmOaijcdZVjC/+5FxC7rIx/Bc+vJCmMTTAkud0RfF4zDBPAqEv0q
+I+4lR/ATThkRmX3XJSBDeI62MJTOPHqZ13mPnof5fAdy9HFclc1vwMoBjOofJpq4
+DiQqchzR8eg0YXFDfaKptDrjvBGeffb14RjI7MeNwp5YIrEc4zZfQGZ3p3Q8oH84
+vMbWjiWp/OZH+ZBVixLWQVMrTu1jSE7Hj7FgbBJzaXGoH/NyYqTTWany06Mpltu7
++71v/gJGgav+VxGcPoEzI83SCKdWdlLdtK5HjzpmqMixX1NaO5gfQblatmi7qLIT
+f42j7Ul9tumMOLPtKQmiuloMJHO7mUmqOZDxmbrNmb47rAmIU3KRx5oNID9rLhxe
+4tuAIsY8Lu2mU+PR5XQlgjG1J0aCunxUOZ4HhLUqJ6U+QWLUpRAq74zjPGocIv1e
+GAH2qkfaNTarBQKytsA7k6vnzHmY7KYup3c9qQjMC8XzjuKBF5oJXl3yBU2VCPaw
+qVWF89Lpz5nHVxmY2ejU/DvV7zUUAiqlVyzFmiOed5O66jVtPG4YM5x2EMwNvejk
+e9rMe4DS8qoQg4er1Z3WNcb4JOAc33HDOol1LFOH1buNN5V+KrkUo0fPWMf4nQ97
+GDFkaTe3nUJdYV4=
+=SNcy
+-----END PGP PUBLIC KEY BLOCK-----`
+
+	testGPGCommitSignature = "-----BEGIN PGP SIGNATURE-----\n\niQIzBAABCAAdFiEEfYJxMHx+E0DPuqaA80S93OFfF9cFAmME7aIACgkQ80S93OFf\nF9eFWBAAq5hOcZIx/A+8J6/NwRtXMs5OW+TJxzJb5siXdRC8Mjrm+fqwpTPPHqtB\nbb7iuiRnmY/HqCegULiw4qVxDyA3sswyDHPLcyUcfG4drJGylPW9ZYg3YeRslX2B\niQykYZyd4h3R/euYAuBKA9vMGoWnaU/Vh22A11Po1pXpPq623FTkiFOSAZrD8Hql\nEvmlhw26qHSPlhsdSKsR+/FPvpLUXlNUiYB5oq7W9qy0yOOafgwZ9r3vvxshzvkt\nvW5zG+R05thQ8icCyrWfEfIWp+TTtQX3asOopnQG9dFs2LRODLXXaHTRVRB/MWPa\nNVvUD/dIzBVyNimpik+2Uqq5jWNiXavQmqoxyL9n4A372AIH7Hu78NnfmAz7VnYo\nyVHRNBryiCcYNj5g0x/WnGsDuhQr7170ODw7QfEYJdCPxGgYuhdYovHdjcMcgWpF\ncWEtayj8bhuLTjjxEsqXTv+psxwB55N5OUvyXmNAaFLhJSEI+l1VHW14L3gZFdPT\n+VgPQtT9a1+GEjPqLvZ6wLVTcSI9uogK6NHowmyM261FtFQqLVdkOdUU8RCR8qLC\nekZWQaJutqicIZTolAQyBPBw8aQz0i+uBUgdWkoiHf/zEEudu0b06IpDq2oYFFVH\nVmCuZ3/AcXrW6T3XXcE5pu+Rvsi57O7iR8i7TIP0CaDTr2FfQWc=\n=/H7t\n-----END PGP SIGNATURE-----"
+)
+
+func TestSortEntitiesFiles(t *testing.T) {
+	filesContext := map[string][]byte{
+		".cds/workflows/w1.yml":           nil,
+		".cds/actions/act1.yml":           nil,
+		".cds/workflow-templates/wt2.yml": nil,
+		".cds/worker-models/wm1.yml":      nil,
+		".cds/worker-models/wm2.yml":      nil,
+		".cds/workflows/w2.yml":           nil,
+		".cds/actions/act2.yml":           nil,
+		".cds/workflow-templates/wt1.yml": nil,
+	}
+	keys := sortEntitiesFiles(filesContext)
+	require.Equal(t, ".cds/worker-models/wm1.yml", keys[0])
+	require.Equal(t, ".cds/worker-models/wm2.yml", keys[1])
+	require.Equal(t, ".cds/actions/act1.yml", keys[2])
+	require.Equal(t, ".cds/actions/act2.yml", keys[3])
+	require.Equal(t, ".cds/workflow-templates/wt1.yml", keys[4])
+	require.Equal(t, ".cds/workflow-templates/wt2.yml", keys[5])
+	require.Equal(t, ".cds/workflows/w1.yml", keys[6])
+	require.Equal(t, ".cds/workflows/w2.yml", keys[7])
+
+}
+func TestCleanAnalysis(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	api.Config.Entity.AnalysisRetention = 50
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	vcsProject := &sdk.VCSProject{
+		Name:        "the-name",
+		Type:        sdk.VCSTypeGithub,
+		Auth:        sdk.VCSAuthProject{Username: "the-username", Token: "the-token"},
+		Description: "the-username",
+		ProjectID:   proj1.ID,
+	}
+
+	err := vcs.Insert(context.TODO(), db, vcsProject)
+	require.NoError(t, err)
+	require.NotEmpty(t, vcsProject.ID)
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		CloneURL:     "myurl",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	for i := 0; i < 60; i++ {
+		a := sdk.ProjectRepositoryAnalysis{
+			ProjectRepositoryID: repo.ID,
+			ProjectKey:          proj1.Key,
+			VCSProjectID:        vcsProject.ID,
+		}
+		require.NoError(t, repository.InsertAnalysis(context.TODO(), db, &a))
+	}
+	api.cleanRepositoryAnalysis(ctx, 1*time.Second)
+
+	analyses, err := repository.LoadAnalysesByRepo(context.TODO(), db, repo.ID)
+	require.NoError(t, err)
+	require.Len(t, analyses, 50)
+}
+
+func TestAnalyzeGithubWithoutHash(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: "fakesign",
+					Verified:  true,
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, "unable to check the commit signature, commit abcdef not found", analysisUpdated.Data.Error)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, analysisUpdated.Status)
+}
+
+func TestAnalyzeGithubWrongSignature(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: "fakesign",
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, analysisUpdated.Status)
+	require.Contains(t, analysisUpdated.Data.Error, "unable to check the commit signature")
+}
+
+func TestAnalyzeGithubGPGKeyNotFound(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	userKey, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if userKey != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *userKey))
+	}
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+		Data: sdk.ProjectRepositoryData{
+			Initiator: &sdk.V2Initiator{
+				VCS:         "vcs-server",
+				VCSUsername: "my-githup-username",
+			},
+		},
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(2)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, analysisUpdated.Status)
+	require.Equal(t, "signing key F344BDDCE15F17D7 is not registered in CDS: add it to your CDS user profile", analysisUpdated.Data.Error)
+}
+
+func TestAnalyzeGithubUserNotEnoughPerm(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              "F344BDDCE15F17D7",
+		PublicKey:          testGPGPublicKey,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "worker-models",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	modelContent := `
+    name: docker-debian
+    description: my debian worker model
+    osarch: linux/amd64
+    type: docker
+    spec:
+      image: myimage:1.1
+      envs:
+        MYVAR: toto
+  `
+	content64 := base64.StdEncoding.EncodeToString([]byte(modelContent))
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworker-models%2Fmymodel.yml?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				content := sdk.VCSContent{
+					IsFile:  true,
+					Name:    "mymodel.yml",
+					Content: content64,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworker-models?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsFile: true,
+						Name:   "mymodel.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSkipped, analysisUpdated.Status)
+	require.Contains(t, analysisUpdated.Data.Error, "User doesn't have the permission to manage WorkerModel")
+}
+
+func TestAnalyzeGithubServerCommitNotSigned(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Hash: "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSkipped, analysisUpdated.Status)
+	require.Equal(t, "commit abcdef is not signed, or its signature is not recognized by vcs-server: sign it with a GPG key registered on your vcs-server account", analysisUpdated.Data.Error)
+}
+
+func TestAnalyzeGithubAddWorkerModel(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              "F344BDDCE15F17D7",
+		PublicKey:          testGPGPublicKey,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	model := `
+    name: docker-debian
+    description: my debian worker model
+    osarch: linux/amd64
+    type: docker
+    spec:
+      image: myimage:1.1
+      envs:
+        MYVAR: toto
+  `
+	encodedModel := base64.StdEncoding.EncodeToString([]byte(model))
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "worker-models",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworker-models?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "mymodels.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworker-models%2Fmymodels.yml?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+
+				content := sdk.VCSContent{
+					IsDirectory: false,
+					IsFile:      true,
+					Name:        "mymodels.yml",
+					Content:     encodedModel,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSucceed, analysisUpdated.Status)
+
+	es, err := entity.LoadByTypeAndRefCommit(context.TODO(), db, repo.ID, sdk.EntityTypeWorkerModel, "refs/heads/master", "abcdef")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, len(es))
+	require.Equal(t, model, es[0].Data)
+	t.Logf("%+v", es[0])
+
+	// The committer found through its GPG key owns the entity, without any privilege
+	require.NotNil(t, es[0].Initiator)
+	require.Equal(t, u.ID, es[0].Initiator.UserID)
+	require.Equal(t, u.Username, es[0].Initiator.User.Username)
+	require.False(t, es[0].Initiator.IsAdminWithMFA)
+	require.NotNil(t, es[0].DeprecatedUserID)
+	require.Equal(t, u.ID, *es[0].DeprecatedUserID)
+
+	e, err := entity.LoadByRefTypeNameCommit(context.TODO(), db, repo.ID, "refs/heads/master", sdk.EntityTypeWorkerModel, "docker-debian", "abcdef")
+	require.NoError(t, err)
+	require.Equal(t, model, e.Data)
+}
+
+func TestAnalyzeGithubMergeCommitNoLink(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	githubUsername := sdk.RandomString(10)
+	api.Config.VCS.GPGKeys = map[string][]GPGKey{
+		"vcs-server": {
+			{
+				ID:        "F344BDDCE15F17D7",
+				PublicKey: testGPGPublicKey,
+			},
+		},
+	}
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+			commit := &sdk.VCSCommit{
+				Author: sdk.VCSAuthor{
+					Name: githubUsername,
+					ID:   "1234",
+				},
+			}
+			*(out.(*sdk.VCSCommit)) = *commit
+			return nil, 200, nil
+		},
+		).MaxTimes(1)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	t.Logf("%+v", analysisUpdated.Data)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, analysisUpdated.Status)
+	require.Equal(t, fmt.Sprintf("github user %s is not linked to a CDS user: link your github account from your CDS profile", githubUsername), analysisUpdated.Data.Error)
+}
+
+func TestAnalyzeGithubAddWorkerModelMergeCommit(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	githubUsername := sdk.RandomString(10)
+	api.Config.VCS.GPGKeys = map[string][]GPGKey{
+		"vcs-server": {
+			{
+				ID:        "F344BDDCE15F17D7",
+				PublicKey: testGPGPublicKey,
+			},
+		},
+	}
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	ul := sdk.UserLink{
+		Type:               "github",
+		AuthentifiedUserID: u.ID,
+		Username:           githubUsername,
+		ExternalID:         sdk.RandomString(10),
+	}
+	require.NoError(t, link.Insert(context.TODO(), db, &ul))
+
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	model := `name: docker-debian
+description: my debian worker model
+type: docker
+osarch: linux/amd64
+spec:
+  image: myimage:1.1
+  envs:
+    MYVAR: toto
+
+`
+	encodedModel := base64.StdEncoding.EncodeToString([]byte(model))
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+					Author: sdk.VCSAuthor{
+						Name: githubUsername,
+						ID:   ul.ExternalID,
+					},
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(2)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "worker-models",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworker-models?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "mymodels.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworker-models%2Fmymodels.yml?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+
+				content := sdk.VCSContent{
+					IsDirectory: false,
+					IsFile:      true,
+					Name:        "mymodels.yml",
+					Content:     encodedModel,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSucceed, analysisUpdated.Status)
+
+	es, err := entity.LoadByTypeAndRefCommit(context.TODO(), db, repo.ID, sdk.EntityTypeWorkerModel, "refs/heads/master", "abcdef")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, len(es))
+	require.Equal(t, model, es[0].Data)
+	t.Logf("%+v", es[0])
+
+	e, err := entity.LoadByRefTypeNameCommit(context.TODO(), db, repo.ID, "refs/heads/master", sdk.EntityTypeWorkerModel, "docker-debian", "abcdef")
+	require.NoError(t, err)
+	require.Equal(t, model, e.Data)
+}
+
+func TestAnalyzeBitbucketMergeCommit(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	_, _ = db.Exec("DELETE FROM service")
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	api.Config.VCS.GPGKeys = map[string][]GPGKey{
+		"vcs-server": {
+			{
+				ID:        "F344BDDCE15F17D7",
+				PublicKey: testGPGPublicKey,
+			},
+		},
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+	linkBitbucketServerUser(t, db, u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", sdk.VCSTypeBitbucketServer)
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+		Data: sdk.ProjectRepositoryData{
+			OperationUUID: sdk.UUID(),
+		},
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	model := `
+    name: docker-debian
+    description: my debian worker model
+    osarch: linux/amd64
+    type: docker
+    spec:
+      image: myimage:1.1
+      envs:
+        MYVAR: toto
+  `
+
+	buf := new(bytes.Buffer)
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name: ".cds/worker-models/model.yml",
+		Mode: 0755,
+		Size: int64(len([]byte(model))),
+	}
+	require.NoError(t, tw.WriteHeader(hdr))
+	_, err := tw.Write([]byte(model))
+	require.NoError(t, err)
+	tw.Close()
+	gw.Close()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef&offset=0&limit=1", gomock.Any(), gomock.Any(), gomock.Any())
+
+	servicesClients.EXPECT().
+		StreamRequest(gomock.Any(), "POST", "/vcs/vcs-server/repos/myrepo/archive", gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, _ interface{}) (io.Reader, http.Header, int, error) {
+				return bytes.NewReader(buf.Bytes()), nil, 200, nil
+			},
+		)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Hash: "abcdef",
+					Committer: sdk.VCSAuthor{
+						Name:        u.Username,
+						Slug:        u.Username,
+						DisplayName: u.Username,
+						Email:       u.GetEmail(),
+					},
+					Verified: true,
+					KeyID:    "F344BDDCE15F17D7",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(2)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "worker-models",
+					},
+					{
+						IsDirectory: true,
+						Name:        "worker-model-templates",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworker-models?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "mymodels.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSucceed, analysisUpdated.Status)
+
+	es, err := entity.LoadByTypeAndRefCommit(context.TODO(), db, repo.ID, sdk.EntityTypeWorkerModel, "refs/heads/master", "abcdef")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, len(es))
+	require.Equal(t, model, es[0].Data)
+
+	e, err := entity.LoadByRefTypeNameCommit(context.TODO(), db, repo.ID, "refs/heads/master", sdk.EntityTypeWorkerModel, "docker-debian", "abcdef")
+	require.NoError(t, err)
+	require.Equal(t, model, e.Data)
+}
+
+func TestManageWorkflowHooksAllDistantEntitiesOndefaultBranch(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+
+	_, err := db.Exec("DELETE from v2_workflow_hook")
+	require.NoError(t, err)
+
+	proj := assets.InsertTestProject(t, db, api.Cache, sdk.RandomString(10), sdk.RandomString(10))
+	vcsServer := assets.InsertTestVCSProject(t, db, proj.ID, "github", "github")
+	repoDef := assets.InsertTestProjectRepository(t, db, proj.Key, vcsServer.ID, "sgu/myDefRepo")
+
+	//
+	e := sdk.EntityWithObject{
+		Entity: sdk.Entity{
+			Initiator:           &sdk.V2Initiator{},
+			ProjectKey:          proj.Key,
+			ProjectRepositoryID: repoDef.ID,
+			Ref:                 "refs/heads/main",
+			Type:                sdk.EntityTypeWorkflow,
+			Commit:              "123456",
+			Name:                sdk.RandomString(10),
+			Head:                true,
+		},
+		Workflow: sdk.V2Workflow{
+			Repository: &sdk.WorkflowRepository{
+				VCSServer: vcsServer.Name,
+				Name:      "sgu/myapp",
+			},
+			On: &sdk.WorkflowOn{
+				Push:           &sdk.WorkflowOnPush{},
+				WorkflowUpdate: &sdk.WorkflowOnWorkflowUpdate{},
+				ModelUpdate: &sdk.WorkflowOnModelUpdate{
+					Models: []string{"MyModel"},
+				},
+				Schedule: []sdk.WorkflowOnSchedule{
+					{
+						Cron: "0 12 * * 5",
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, entity.Insert(context.TODO(), db, &e.Entity))
+
+	srvs, err := services.LoadAllByType(context.TODO(), api.mustDB(), sdk.TypeHooks)
+	require.NoError(t, err)
+
+	_, err = manageWorkflowHooks(context.TODO(), db, api.Cache, nil, e, "github", "sgu/mydefrepo", &sdk.VCSBranch{ID: "refs/heads/main", LatestCommit: "123456"}, srvs)
+	require.NoError(t, err)
+
+	repoWebHooks, err := workflow_v2.LoadHooksByRepositoryEvent(context.TODO(), db, vcsServer.Name, "sgu/myapp", "push")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(repoWebHooks))
+
+	require.Equal(t, "123456", repoWebHooks[0].Commit)
+	require.True(t, repoWebHooks[0].Head)
+
+	// Distant workflow so worklow update hook must be saved
+	workflowUpdateHooks, err := workflow_v2.LoadHooksByWorkflowUpdated(context.TODO(), db, proj.Key, vcsServer.Name, repoDef.Name, e.Name, e.Ref)
+	require.NoError(t, err)
+	require.NotNil(t, workflowUpdateHooks)
+
+	// Distant workflow so model update hook must be saved
+	modelKey := fmt.Sprintf("%s/%s/%s/%s", proj.Key, vcsServer.Name, repoDef.Name, "MyModel")
+	hooks, err := workflow_v2.LoadHooksByModelUpdated(context.TODO(), db, e.Ref, []string{modelKey})
+	require.NoError(t, err)
+	require.Equal(t, 1, len(hooks))
+
+	scheds, err := workflow_v2.LoadHookByWorkflowAndType(context.TODO(), db, proj.Key, vcsServer.Name, "sgu/mydefrepo", e.Name, sdk.WorkflowHookTypeScheduler)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(scheds))
+	require.Equal(t, "sgu/myapp", scheds[0].Data.RepositoryName)
+	require.Equal(t, "sgu/mydefrepo", scheds[0].RepositoryName)
+}
+
+func TestManageWorkflowHooksAllDistantEntities(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+
+	_, err := db.Exec("DELETE from v2_workflow_hook")
+	require.NoError(t, err)
+
+	proj := assets.InsertTestProject(t, db, api.Cache, sdk.RandomString(10), sdk.RandomString(10))
+	vcsServer := assets.InsertTestVCSProject(t, db, proj.ID, "github", "github")
+	repoDef := assets.InsertTestProjectRepository(t, db, proj.Key, vcsServer.ID, "sgu/myDefRepo")
+
+	//
+	e := sdk.EntityWithObject{
+		Entity: sdk.Entity{
+			Initiator:           &sdk.V2Initiator{},
+			ProjectKey:          proj.Key,
+			ProjectRepositoryID: repoDef.ID,
+			Ref:                 "refs/heads/main",
+			Type:                sdk.EntityTypeWorkflow,
+			Commit:              "123456",
+			Head:                true,
+			Name:                sdk.RandomString(10),
+		},
+		Workflow: sdk.V2Workflow{
+			Repository: &sdk.WorkflowRepository{
+				VCSServer: vcsServer.Name,
+				Name:      "sgu/myapp",
+			},
+			On: &sdk.WorkflowOn{
+				Push:           &sdk.WorkflowOnPush{},
+				WorkflowUpdate: &sdk.WorkflowOnWorkflowUpdate{},
+				ModelUpdate: &sdk.WorkflowOnModelUpdate{
+					Models: []string{"MyModel"},
+				},
+			},
+		},
+	}
+	require.NoError(t, entity.Insert(context.TODO(), db, &e.Entity))
+	_, err = manageWorkflowHooks(context.TODO(), db, api.Cache, nil, e, "github", "sgu/mydefrepo", &sdk.VCSBranch{ID: "refs/heads/main"}, nil)
+	require.NoError(t, err)
+
+	repoWebHooks, err := workflow_v2.LoadHooksByRepositoryEvent(context.TODO(), db, vcsServer.Name, "sgu/myapp", "push")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(repoWebHooks))
+
+	// Distant workflow so worklow update hook must be saved
+	workflowUpdateHooks, err := workflow_v2.LoadHooksByWorkflowUpdated(context.TODO(), db, proj.Key, vcsServer.Name, repoDef.Name, e.Name, e.Ref)
+	require.NoError(t, err)
+	require.NotNil(t, workflowUpdateHooks)
+
+	// Distant workflow so model update hook must be saved
+	modelKey := fmt.Sprintf("%s/%s/%s/%s", proj.Key, vcsServer.Name, repoDef.Name, "MyModel")
+	hooks, err := workflow_v2.LoadHooksByModelUpdated(context.TODO(), db, e.Ref, []string{modelKey})
+	require.NoError(t, err)
+	require.Equal(t, 1, len(hooks))
+}
+
+func TestManageWorkflowHooksAllDistantEntitiesWithModelOnDifferentRepo(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+
+	_, err := db.Exec("DELETE from v2_workflow_hook")
+	require.NoError(t, err)
+
+	proj := assets.InsertTestProject(t, db, api.Cache, sdk.RandomString(10), sdk.RandomString(10))
+	vcsServer := assets.InsertTestVCSProject(t, db, proj.ID, "github", "github")
+	repoDef := assets.InsertTestProjectRepository(t, db, proj.Key, vcsServer.ID, "sgu/myDefRepo")
+
+	//
+	e := sdk.EntityWithObject{
+		Entity: sdk.Entity{
+			Initiator:           &sdk.V2Initiator{},
+			ProjectKey:          proj.Key,
+			ProjectRepositoryID: repoDef.ID,
+			Ref:                 "refs/heads/main",
+			Type:                sdk.EntityTypeWorkflow,
+			Commit:              "123456",
+			Name:                sdk.RandomString(10),
+			Head:                true,
+		},
+		Workflow: sdk.V2Workflow{
+			Repository: &sdk.WorkflowRepository{
+				VCSServer: vcsServer.Name,
+				Name:      "sgu/myapp",
+			},
+			On: &sdk.WorkflowOn{
+				Push:           &sdk.WorkflowOnPush{},
+				WorkflowUpdate: &sdk.WorkflowOnWorkflowUpdate{},
+				ModelUpdate: &sdk.WorkflowOnModelUpdate{
+					Models: []string{"sgu/myresources/MyModel"},
+				},
+			},
+		},
+	}
+	require.NoError(t, entity.Insert(context.TODO(), db, &e.Entity))
+	_, err = manageWorkflowHooks(context.TODO(), db, api.Cache, nil, e, "github", "sgu/mydefrepo", &sdk.VCSBranch{ID: "refs/heads/main"}, nil)
+	require.NoError(t, err)
+
+	repoWebHooks, err := workflow_v2.LoadHooksByRepositoryEvent(context.TODO(), db, vcsServer.Name, "sgu/myapp", "push")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(repoWebHooks))
+
+	// Distant workflow so worklow update hook must be saved
+	workflowUpdateHooks, err := workflow_v2.LoadHooksByWorkflowUpdated(context.TODO(), db, proj.Key, vcsServer.Name, repoDef.Name, e.Name, e.Ref)
+	require.NoError(t, err)
+	require.NotNil(t, workflowUpdateHooks)
+
+	// Model and workflow on different repo,  hook must not be saved
+	modelKey := fmt.Sprintf("%s/%s/%s/%s", proj.Key, vcsServer.Name, repoDef.Name, "MyModel")
+	hooks, err := workflow_v2.LoadHooksByModelUpdated(context.TODO(), db, e.Ref, []string{modelKey})
+	require.NoError(t, err)
+	require.Equal(t, 0, len(hooks))
+}
+
+func TestManageWorkflowHooksAllDistantEntitiesNonDefaultBranch(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+
+	_, err := db.Exec("DELETE from v2_workflow_hook")
+	require.NoError(t, err)
+
+	proj := assets.InsertTestProject(t, db, api.Cache, sdk.RandomString(10), sdk.RandomString(10))
+	vcsServer := assets.InsertTestVCSProject(t, db, proj.ID, "github", "github")
+	repoDef := assets.InsertTestProjectRepository(t, db, proj.Key, vcsServer.ID, "sgu/myDefRepo")
+
+	//
+	e := sdk.EntityWithObject{
+		Entity: sdk.Entity{
+			Initiator:           &sdk.V2Initiator{},
+			ProjectKey:          proj.Key,
+			ProjectRepositoryID: repoDef.ID,
+			Ref:                 "refs/heads/test",
+			Type:                sdk.EntityTypeWorkflow,
+			Commit:              "123456",
+			Head:                true,
+			Name:                sdk.RandomString(10),
+		},
+		Workflow: sdk.V2Workflow{
+			Repository: &sdk.WorkflowRepository{
+				VCSServer: vcsServer.Name,
+				Name:      "sgu/myapp",
+			},
+			On: &sdk.WorkflowOn{
+				Push:           &sdk.WorkflowOnPush{},
+				WorkflowUpdate: &sdk.WorkflowOnWorkflowUpdate{},
+				ModelUpdate: &sdk.WorkflowOnModelUpdate{
+					Models: []string{"MyModel"},
+				},
+				Schedule: []sdk.WorkflowOnSchedule{
+					{
+						Cron: "* * * * *",
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, entity.Insert(context.TODO(), db, &e.Entity))
+	_, err = manageWorkflowHooks(context.TODO(), db, api.Cache, nil, e, "github", "sgu/mydefrepo", &sdk.VCSBranch{ID: "refs/heads/main"}, nil)
+	require.NoError(t, err)
+
+	repoWebHooks, err := workflow_v2.LoadHooksByRepositoryEvent(context.TODO(), db, vcsServer.Name, "sgu/myapp", "push")
+	require.NoError(t, err)
+	require.Equal(t, 0, len(repoWebHooks))
+
+	// Non default branch, hook must not be saved
+	_, err = workflow_v2.LoadHooksByWorkflowUpdated(context.TODO(), db, proj.Key, vcsServer.Name, repoDef.Name, e.Name, e.Ref)
+	require.True(t, sdk.ErrorIs(err, sdk.ErrNotFound))
+
+	// Non default branch, hook must not be saved
+	modelKey := fmt.Sprintf("%s/%s/%s/%s", proj.Key, vcsServer.Name, repoDef.Name, "MyModel")
+	hooks, err := workflow_v2.LoadHooksByModelUpdated(context.TODO(), db, e.Ref, []string{modelKey})
+	require.NoError(t, err)
+	require.Equal(t, 0, len(hooks))
+}
+
+func TestAnalyzeGithubDeleteEntity(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              "F344BDDCE15F17D7",
+		PublicKey:          testGPGPublicKey,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkflow, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	workflowEntity := sdk.Entity{
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeWorkflow,
+		Commit:              "abcdef",
+		Ref:                 "refs/heads/master",
+		Name:                "workflow1",
+		Head:                true,
+	}
+	require.NoError(t, entity.Insert(ctx, db, &workflowEntity))
+
+	actionEntity := sdk.Entity{
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeAction,
+		Commit:              "abcdef",
+		Ref:                 "refs/heads/master",
+		Name:                "action1",
+		Head:                true,
+	}
+	require.NoError(t, entity.Insert(ctx, db, &actionEntity))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	model := `
+    name: docker-debian
+    description: my debian worker model
+    osarch: linux/amd64
+    type: docker
+    spec:
+      image: myimage:1.1
+      envs:
+        MYVAR: toto
+  `
+	encodedModel := base64.StdEncoding.EncodeToString([]byte(model))
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "worker-models",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworker-models?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "mymodels.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworker-models%2Fmymodels.yml?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+
+				content := sdk.VCSContent{
+					IsDirectory: false,
+					IsFile:      true,
+					Name:        "mymodels.yml",
+					Content:     encodedModel,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSucceed, analysisUpdated.Status)
+
+	es, err := entity.LoadByTypeAndRefCommit(context.TODO(), db, repo.ID, sdk.EntityTypeWorkerModel, "refs/heads/master", "abcdef")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, len(es))
+	require.Equal(t, model, es[0].Data)
+
+	e, err := entity.LoadByRefTypeNameCommit(context.TODO(), db, repo.ID, "refs/heads/master", sdk.EntityTypeWorkerModel, "docker-debian", "abcdef")
+	require.NoError(t, err)
+	require.Equal(t, model, e.Data)
+
+	// Check workflow deletion
+	_, err = entity.LoadHeadEntityByRefTypeName(ctx, db, repo.ID, "refs/heads/master", sdk.EntityTypeWorkflow, "workflow1")
+	require.True(t, sdk.ErrorIs(err, sdk.ErrNotFound))
+
+	// Check action
+	_, err = entity.LoadHeadEntityByRefTypeName(ctx, db, repo.ID, "refs/heads/master", sdk.EntityTypeAction, "action1")
+	require.NoError(t, err)
+}
+
+func TestAnalyzeGithubUpdateWorkerModelNoRight(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              "F344BDDCE15F17D7",
+		PublicKey:          testGPGPublicKey,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	existingEntity := sdk.Entity{
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+		ID:                  sdk.UUID(),
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeWorkerModel,
+		FilePath:            ".cds/worker-models/mymodels.yml",
+		Name:                "docker-debian",
+		Commit:              "abcdef",
+		Ref:                 "refs/heads/master",
+		LastUpdate:          time.Now(),
+		Data:                "blabla",
+	}
+	require.NoError(t, entity.Insert(context.TODO(), db, &existingEntity))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	model := `
+    name: docker-debian
+    description: my debian worker model
+    osarch: linux/amd64
+    type: docker
+    spec:
+      image: myimage:1.1
+      envs:
+        MYVAR: toto
+  `
+	encodedModel := base64.StdEncoding.EncodeToString([]byte(model))
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "worker-models",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworker-models?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "mymodels.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworker-models%2Fmymodels.yml?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+
+				content := sdk.VCSContent{
+					IsDirectory: false,
+					IsFile:      true,
+					Name:        "mymodels.yml",
+					Content:     encodedModel,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSkipped, analysisUpdated.Status)
+
+	es, err := entity.LoadByTypeAndRefCommit(context.TODO(), db, repo.ID, sdk.EntityTypeWorkerModel, "refs/heads/master", "abcdef")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, len(es))
+	require.Equal(t, "blabla", es[0].Data)
+
+	e, err := entity.LoadByRefTypeNameCommit(context.TODO(), db, repo.ID, "refs/heads/master", sdk.EntityTypeWorkerModel, "docker-debian", "abcdef")
+	require.NoError(t, err)
+	require.Equal(t, "blabla", e.Data)
+}
+
+func TestAnalyzeGithubAddWorkflowWithWrongTemplate(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              "F344BDDCE15F17D7",
+		PublicKey:          testGPGPublicKey,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleRead, proj1.Key, *u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkflow, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	workflow := `name: myworkflow
+from: mytemplate
+parameters:
+  toto: tata`
+	encodedWorkflow := base64.StdEncoding.EncodeToString([]byte(workflow))
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "workflows",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworkflows?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "myworkflow.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworkflows%2Fmyworkflow.yml?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+
+				content := sdk.VCSContent{
+					IsDirectory: false,
+					IsFile:      true,
+					Name:        "2Fmyworkflow.yml",
+					Content:     encodedWorkflow,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		).AnyTimes()
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+	anal, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, anal.Status)
+	require.Equal(t, "workflow myworkflow: unable to find workflow dependency: mytemplate", anal.Data.Error)
+}
+
+func TestAnalyzeGithubUpdateWorkflowNoRight(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              "F344BDDCE15F17D7",
+		PublicKey:          testGPGPublicKey,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	existingEntity := sdk.Entity{
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+		ID:                  sdk.UUID(),
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeWorkflow,
+		FilePath:            ".cds/workflows/myworkflow.yml",
+		Name:                "myworkflow",
+		Commit:              "abcdef",
+		Ref:                 "refs/heads/master",
+		LastUpdate:          time.Now(),
+		Data:                "blabla",
+	}
+	require.NoError(t, entity.Insert(context.TODO(), db, &existingEntity))
+
+	existingHeadEntity := existingEntity
+	existingHeadEntity.ID = ""
+	existingHeadEntity.Commit = "HEAD"
+	require.NoError(t, entity.Insert(context.TODO(), db, &existingHeadEntity))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "zyxwv",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/devBranch",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	wkf := `name: myworkflow
+jobs:
+  root:
+    runs-on: .cds/worker-models/mymodel.yml 
+    steps:
+    - run: echo toto`
+	encodedWorkflow := base64.StdEncoding.EncodeToString([]byte(wkf))
+
+	wm := `name: mymodel
+osarch: linux/amd64
+type: docker
+spec:
+  image: myimage`
+
+	encodedWorkerModel := base64.StdEncoding.EncodeToString([]byte(wm))
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=devBranch&default=false&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				branch := &sdk.VCSBranch{
+					ID:           sdk.GitRefBranchPrefix + "devBranch",
+					DisplayID:    "devBranch",
+					Default:      false,
+					LatestCommit: "zyxwv",
+				}
+				*(out.(*sdk.VCSBranch)) = *branch
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/zyxwv", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=zyxwv&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "workflows",
+					},
+					{
+						IsDirectory: true,
+						Name:        "worker-models",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworkflows?commit=zyxwv&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "myworkflow.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworker-models?commit=zyxwv&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "mymodel.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworkflows%2Fmyworkflow.yml?commit=zyxwv", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+
+				content := sdk.VCSContent{
+					IsDirectory: false,
+					IsFile:      true,
+					Name:        "myworkflow.yml",
+					Content:     encodedWorkflow,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworker-models%2Fmymodel.yml?commit=zyxwv", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+
+				content := sdk.VCSContent{
+					IsDirectory: false,
+					IsFile:      true,
+					Name:        "mymodel.yml",
+					Content:     encodedWorkerModel,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID:           "refs/heads/master",
+					LatestCommit: "abcdef",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	t.Logf(">>>>%+v", analysisUpdated.Data.Error)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSkipped, analysisUpdated.Status)
+
+	entitiesNonHEad, err := entity.LoadByTypeAndRefCommit(context.TODO(), db, repo.ID, sdk.EntityTypeWorkflow, "refs/heads/devBranch", "zyxwv")
+	require.NoError(t, err)
+	entitiesHEad, err := entity.LoadByTypeAndRefCommit(context.TODO(), db, repo.ID, sdk.EntityTypeWorkflow, "refs/heads/devBranch", "HEAD")
+	require.NoError(t, err)
+
+	require.Equal(t, 0, len(entitiesNonHEad))
+	require.Equal(t, 0, len(entitiesHEad))
+}
+
+func TestAnalyzeWrongWorkflow(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	_, _ = db.Exec("DELETE FROM service")
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	api.Config.VCS.GPGKeys = map[string][]GPGKey{
+		"vcs-server": {
+			{
+				ID:        "F344BDDCE15F17D7",
+				PublicKey: testGPGPublicKey,
+			},
+		},
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	linkBitbucketServerUser(t, db, u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", sdk.VCSTypeBitbucketServer)
+
+	repo := sdk.ProjectRepository{
+		Name:         "my/repo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+		Data: sdk.ProjectRepositoryData{
+			OperationUUID: sdk.UUID(),
+		},
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	entityWM := sdk.Entity{
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeWorkerModel,
+		FilePath:            ".cds/worker-models/mymodel.yml",
+		Name:                "mymodel",
+		Commit:              "HEAD",
+		Ref:                 "refs/heads/main",
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+		Data:                "name: mymodel",
+	}
+	require.NoError(t, entity.Insert(ctx, db, &entityWM))
+
+	modelPath := fmt.Sprintf("%s/%s/%s/%s@refs/heads/main", proj1.Key, vcsProject.Name, repo.Name, entityWM.Name)
+
+	wkf := fmt.Sprintf(`name: myworkflow
+jobs:
+  root:
+    concurrency: toto
+    runs-on: %s
+    steps:
+    - run: echo toto`, modelPath)
+
+	buf := new(bytes.Buffer)
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name: ".cds/workflows/myworkflow.yml",
+		Mode: 0755,
+		Size: int64(len([]byte(wkf))),
+	}
+	require.NoError(t, tw.WriteHeader(hdr))
+	_, err := tw.Write([]byte(wkf))
+	require.NoError(t, err)
+	tw.Close()
+	gw.Close()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds?commit=abcdef&offset=0&limit=1", gomock.Any(), gomock.Any(), gomock.Any())
+
+	servicesClients.EXPECT().
+		StreamRequest(gomock.Any(), "POST", "/vcs/vcs-server/repos/my/repo/archive", gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, _ interface{}) (io.Reader, http.Header, int, error) {
+				return bytes.NewReader(buf.Bytes()), nil, 200, nil
+			},
+		)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Hash: "abcdef",
+					Committer: sdk.VCSAuthor{
+						Name:        u.Username,
+						Slug:        u.Username,
+						DisplayName: u.Username,
+						Email:       u.GetEmail(),
+					},
+					Verified: true,
+					KeyID:    "F344BDDCE15F17D7",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(2)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "workflows",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds%2Fworkflows?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "myworkflow.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, analysisUpdated.Status)
+	require.Contains(t, analysisUpdated.Data.Error, "workflow myworkflow job root: concurrency toto doesn't exist")
+}
+
+func TestAnalyzeWorkflowWithProjectConcurrency(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	_, _ = db.Exec("DELETE FROM service")
+	_, _ = db.Exec("DELETE FROM user_gpg_key")
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	pc := sdk.ProjectConcurrency{
+		ProjectKey: proj1.Key,
+		Name:       "toto",
+		Order:      sdk.ConcurrencyOrderNewestFirst,
+		Pool:       1,
+	}
+	require.NoError(t, project.InsertConcurrency(ctx, db, &pc))
+
+	api.Config.VCS.GPGKeys = map[string][]GPGKey{
+		"vcs-server": {
+			{
+				ID:        "F344BDDCE15F17D7",
+				PublicKey: testGPGPublicKey,
+			},
+		},
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	linkBitbucketServerUser(t, db, u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleRead, proj1.Key, *u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkflow, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", sdk.VCSTypeBitbucketServer)
+
+	repo := sdk.ProjectRepository{
+		Name:         "my/repo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+		Data: sdk.ProjectRepositoryData{
+			OperationUUID: sdk.UUID(),
+		},
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	entityWM := sdk.Entity{
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeWorkerModel,
+		FilePath:            ".cds/worker-models/mymodel.yml",
+		Name:                "mymodel",
+		Commit:              "abcdef",
+		Ref:                 "refs/heads/main",
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+		Data:                "name: mymodel",
+		Head:                true,
+	}
+	require.NoError(t, entity.Insert(ctx, db, &entityWM))
+
+	modelPath := fmt.Sprintf("%s/%s/%s/%s@refs/heads/main", proj1.Key, vcsProject.Name, repo.Name, entityWM.Name)
+
+	wkf := fmt.Sprintf(`name: myworkflow
+jobs:
+  root:
+    concurrency: toto
+    runs-on: %s
+    steps:
+    - run: echo toto`, modelPath)
+
+	buf := new(bytes.Buffer)
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name: ".cds/workflows/myworkflow.yml",
+		Mode: 0755,
+		Size: int64(len([]byte(wkf))),
+	}
+	require.NoError(t, tw.WriteHeader(hdr))
+	_, err := tw.Write([]byte(wkf))
+	require.NoError(t, err)
+	tw.Close()
+	gw.Close()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds?commit=abcdef&offset=0&limit=1", gomock.Any(), gomock.Any(), gomock.Any())
+
+	servicesClients.EXPECT().
+		StreamRequest(gomock.Any(), "POST", "/vcs/vcs-server/repos/my/repo/archive", gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, _ interface{}) (io.Reader, http.Header, int, error) {
+				return bytes.NewReader(buf.Bytes()), nil, 200, nil
+			},
+		)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Hash: "abcdef",
+					Committer: sdk.VCSAuthor{
+						Name:        u.Username,
+						Slug:        u.Username,
+						DisplayName: u.Username,
+						Email:       u.GetEmail(),
+					},
+					Verified: true,
+					KeyID:    "F344BDDCE15F17D7",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(2)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "workflows",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds%2Fworkflows?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "myworkflow.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+
+	require.Equal(t, sdk.RepositoryAnalysisStatusSucceed, analysisUpdated.Status)
+}
+
+func TestAnalyzeWorkflowWithConcurrency(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	_, _ = db.Exec("DELETE FROM service")
+	_, _ = db.Exec("DELETE FROM rbac")
+	_, _ = db.Exec("DELETE FROM user_gpg_key")
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	pc := sdk.ProjectConcurrency{
+		ProjectKey: proj1.Key,
+		Name:       "toto",
+		Order:      sdk.ConcurrencyOrderNewestFirst,
+		Pool:       1,
+	}
+	require.NoError(t, project.InsertConcurrency(ctx, db, &pc))
+
+	api.Config.VCS.GPGKeys = map[string][]GPGKey{
+		"vcs-server": {
+			{
+				ID:        "F344BDDCE15F17D7",
+				PublicKey: testGPGPublicKey,
+			},
+		},
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	linkBitbucketServerUser(t, db, u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleRead, proj1.Key, *u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkflow, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", sdk.VCSTypeBitbucketServer)
+
+	repo := sdk.ProjectRepository{
+		Name:         "my/repo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+		Data: sdk.ProjectRepositoryData{
+			OperationUUID: sdk.UUID(),
+		},
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	entityWM := sdk.Entity{
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeWorkerModel,
+		FilePath:            ".cds/worker-models/mymodel.yml",
+		Name:                "mymodel",
+		Commit:              "abcdef",
+		Ref:                 "refs/heads/main",
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+		Data:                "name: mymodel",
+		Head:                true,
+	}
+	require.NoError(t, entity.Insert(ctx, db, &entityWM))
+
+	modelPath := fmt.Sprintf("%s/%s/%s/%s@refs/heads/main", proj1.Key, vcsProject.Name, repo.Name, entityWM.Name)
+
+	wkf := fmt.Sprintf(`name: myworkflow
+concurrency: toto	
+jobs:
+  root:
+    runs-on: %s
+    steps:
+    - run: echo toto`, modelPath)
+
+	buf := new(bytes.Buffer)
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name: ".cds/workflows/myworkflow.yml",
+		Mode: 0755,
+		Size: int64(len([]byte(wkf))),
+	}
+	require.NoError(t, tw.WriteHeader(hdr))
+	_, err := tw.Write([]byte(wkf))
+	require.NoError(t, err)
+	tw.Close()
+	gw.Close()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds?commit=abcdef&offset=0&limit=1", gomock.Any(), gomock.Any(), gomock.Any())
+
+	servicesClients.EXPECT().
+		StreamRequest(gomock.Any(), "POST", "/vcs/vcs-server/repos/my/repo/archive", gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, _ interface{}) (io.Reader, http.Header, int, error) {
+				return bytes.NewReader(buf.Bytes()), nil, 200, nil
+			},
+		)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Hash: "abcdef",
+					Author: sdk.VCSAuthor{
+						Name:        u.Username,
+						Slug:        u.Username,
+						DisplayName: u.Username,
+						Email:       u.GetEmail(),
+					},
+					Committer: sdk.VCSAuthor{
+						Name:        u.Username,
+						Slug:        u.Username,
+						DisplayName: u.Username,
+						Email:       u.GetEmail(),
+					},
+					Verified: true,
+					KeyID:    "F344BDDCE15F17D7",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(2)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "workflows",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds%2Fworkflows?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "myworkflow.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+
+	require.Equal(t, sdk.RepositoryAnalysisStatusSucceed, analysisUpdated.Status)
+}
+
+func TestAnalyzeWorkflowWithConcurrencyNotFound(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	_, _ = db.Exec("DELETE FROM service")
+	_, _ = db.Exec("DELETE FROM user_gpg_key")
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	api.Config.VCS.GPGKeys = map[string][]GPGKey{
+		"vcs-server": {
+			{
+				ID:        "F344BDDCE15F17D7",
+				PublicKey: testGPGPublicKey,
+			},
+		},
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	linkBitbucketServerUser(t, db, u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleRead, proj1.Key, *u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkflow, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", sdk.VCSTypeBitbucketServer)
+
+	repo := sdk.ProjectRepository{
+		Name:         "my/repo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+		Data: sdk.ProjectRepositoryData{
+			OperationUUID: sdk.UUID(),
+		},
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	entityWM := sdk.Entity{
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeWorkerModel,
+		FilePath:            ".cds/worker-models/mymodel.yml",
+		Name:                "mymodel",
+		Commit:              "HEAD",
+		Ref:                 "refs/heads/main",
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+		Data:                "name: mymodel",
+	}
+	require.NoError(t, entity.Insert(ctx, db, &entityWM))
+
+	modelPath := fmt.Sprintf("%s/%s/%s/%s@refs/heads/main", proj1.Key, vcsProject.Name, repo.Name, entityWM.Name)
+
+	wkf := fmt.Sprintf(`name: myworkflow
+concurrency: toto	
+jobs:
+  root:
+    runs-on: %s
+    steps:
+    - run: echo toto`, modelPath)
+
+	buf := new(bytes.Buffer)
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name: ".cds/workflows/myworkflow.yml",
+		Mode: 0755,
+		Size: int64(len([]byte(wkf))),
+	}
+	require.NoError(t, tw.WriteHeader(hdr))
+	_, err := tw.Write([]byte(wkf))
+	require.NoError(t, err)
+	tw.Close()
+	gw.Close()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds?commit=abcdef&offset=0&limit=1", gomock.Any(), gomock.Any(), gomock.Any())
+
+	servicesClients.EXPECT().
+		StreamRequest(gomock.Any(), "POST", "/vcs/vcs-server/repos/my/repo/archive", gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, _ interface{}) (io.Reader, http.Header, int, error) {
+				return bytes.NewReader(buf.Bytes()), nil, 200, nil
+			},
+		)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Hash: "abcdef",
+					Committer: sdk.VCSAuthor{
+						Name:        u.Username,
+						Slug:        u.Username,
+						DisplayName: u.Username,
+						Email:       u.GetEmail(),
+					},
+					Author: sdk.VCSAuthor{
+						Name:        u.Username,
+						Slug:        u.Username,
+						DisplayName: u.Username,
+						Email:       u.GetEmail(),
+					},
+					Verified: true,
+					KeyID:    "F344BDDCE15F17D7",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(2)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "workflows",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/my/repo/contents/.cds%2Fworkflows?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "myworkflow.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+
+	require.Contains(t, analysisUpdated.Data.Error, "myworkflow: concurrency toto doesn't exist")
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, analysisUpdated.Status)
+}
+
+func TestAnalyzeGithubNonUpdateWorkerModel(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              "F344BDDCE15F17D7",
+		PublicKey:          testGPGPublicKey,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	assets.InsertRBAcProject(t, db, sdk.ProjectRoleManageWorkerModel, proj1.Key, *u)
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	// Setup a mock for all services called by the API
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	model := `
+    name: docker-debian
+    description: my debian worker model
+    osarch: linux/amd64
+    type: docker
+    spec:
+      image: myimage:1.1
+      envs:
+        MYVAR: toto
+  `
+	encodedModel := base64.StdEncoding.EncodeToString([]byte(model))
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature: testGPGCommitSignature,
+					Verified:  true,
+					Hash:      "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: true,
+						Name:        "worker-models",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/contents/.cds%2Fworker-models?commit=abcdef&offset=0&limit=100", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := []sdk.VCSContent{
+					{
+						IsDirectory: false,
+						IsFile:      true,
+						Name:        "mymodels.yml",
+					},
+				}
+				*(out.(*[]sdk.VCSContent)) = contents
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/content/.cds%2Fworker-models%2Fmymodels.yml?commit=abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+
+				content := sdk.VCSContent{
+					IsDirectory: false,
+					IsFile:      true,
+					Name:        "mymodels.yml",
+					Content:     encodedModel,
+				}
+				*(out.(*sdk.VCSContent)) = content
+				return nil, 200, nil
+			},
+		).MaxTimes(1)
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/branches/?branch=&default=true&noCache=true", gomock.Any(), gomock.Any(), gomock.Any()).Times(1).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				contents := sdk.VCSBranch{
+					ID: "refs/heads/master",
+				}
+				*(out.(*sdk.VCSBranch)) = contents
+				return nil, 200, nil
+			},
+		)
+
+	// Create previous entity
+	previousEnt := sdk.Entity{
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Type:                sdk.EntityTypeWorkerModel,
+		FilePath:            "",
+		Commit:              analysis.Commit,
+		Ref:                 analysis.Ref,
+		Name:                "docker-debian",
+		Data:                "MyModel",
+		Initiator:           &sdk.V2Initiator{UserID: u.ID, User: u.Initiator()},
+	}
+	require.NoError(t, entity.Insert(ctx, db, &previousEnt))
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	t.Logf("%+v", analysisUpdated)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusSucceed, analysisUpdated.Status)
+
+	es, err := entity.LoadByTypeAndRefCommit(context.TODO(), db, repo.ID, sdk.EntityTypeWorkerModel, "refs/heads/master", "abcdef")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, len(es))
+	// Check worker model not updated
+	require.Equal(t, "MyModel", es[0].Data)
+	t.Logf("%+v", es[0])
+
+	e, err := entity.LoadByRefTypeNameCommit(context.TODO(), db, repo.ID, "refs/heads/master", sdk.EntityTypeWorkerModel, "docker-debian", "abcdef")
+	require.NoError(t, err)
+	require.Equal(t, "MyModel", e.Data)
+}
+
+const testGPGKeyID = "F344BDDCE15F17D7"
+const testGPGSignature = testGPGCommitSignature
+
+func setupFindCommitterTest(t *testing.T) (api *API, db *test.FakeTransaction, vcsProjectWithSecret sdk.VCSProject, projKey string, repoName string, cleanup func()) {
+	t.Helper()
+	apiInstance, dbInstance, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Configure VCS public GPG key so publicKeyFound=true → bypass early project-key checks
+	apiInstance.Config.VCS.GPGKeys = map[string][]GPGKey{
+		"vcs-server": {{ID: testGPGKeyID}},
+	}
+
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, dbInstance, apiInstance.Cache, key1, key1)
+	vcsProject := assets.InsertTestVCSProject(t, dbInstance, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(ctx, dbInstance, &repo))
+
+	s, _ := assets.InsertService(t, dbInstance, t.Name()+"_VCS", sdk.TypeVCS)
+	cleanup = func() {
+		_ = services.Delete(dbInstance, s)
+		services.NewClient = services.NewDefaultClient
+	}
+
+	return apiInstance, dbInstance, *vcsProject, proj1.Key, "myrepo", cleanup
+}
+
+// TestFindCommitter_GithubSignedTag_TaggerGPGKeyFound: tag annoté signé, l'utilisateur CDS possède la clé GPG du tagger
+func TestFindCommitter_GithubSignedTag_TaggerGPGKeyFound(t *testing.T) {
+	api, db, vcsProject, projKey, repoName, cleanup := setupFindCommitterTest(t)
+	defer cleanup()
+	ctx := context.TODO()
+
+	// Ensure the GPG key is absent then insert it for our user
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, testGPGKeyID)
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              testGPGKeyID,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	// Mock VCS: return a signed tag
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client { return servicesClients }
+
+	vcsPublicKeys := map[string][]GPGKey{"vcs-server": {{ID: testGPGKeyID}}}
+	initiator, status, errMsg, err := findCommitter(ctx, api.Cache, db.DbMap, "refs/tags/v1.0", "commitsha", testGPGKeyID, projKey, vcsProject, repoName, vcsPublicKeys)
+
+	require.NoError(t, err)
+	require.Empty(t, status)
+	require.Empty(t, errMsg)
+	require.NotNil(t, initiator)
+	require.Equal(t, u.ID, initiator.UserID)
+}
+
+// TestFindCommitter_GithubTag_VCSUser_UnknownAuthor: tag annoté signé, mais la clé GPG n'est pas connue de CDS
+func TestFindCommitter_GithubTag_VCSUser_UnknownAuthor(t *testing.T) {
+	api, db, vcsProject, projKey, repoName, cleanup := setupFindCommitterTest(t)
+	defer cleanup()
+	ctx := context.TODO()
+
+	// Make sure the GPG key is absent from CDS
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, testGPGKeyID)
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client { return servicesClients }
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/tags/v1.0", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+			tag := &sdk.VCSTag{
+				Tag:       "v1.0",
+				Sha:       "tagsha",
+				Hash:      "commitsha",
+				Signature: testGPGSignature,
+			}
+			*(out.(*sdk.VCSTag)) = *tag
+			return nil, 200, nil
+		}).Times(1)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/commitsha", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+			c := &sdk.VCSCommit{
+				Author:    sdk.VCSAuthor{},
+				Committer: sdk.VCSAuthor{},
+				Hash:      "commitsha",
+				Signature: testGPGSignature,
+			}
+			*(out.(*sdk.VCSCommit)) = *c
+			return nil, 200, nil
+		}).Times(1)
+
+	vcsPublicKeys := map[string][]GPGKey{"vcs-server": {{ID: testGPGKeyID}}}
+	initiator, status, errMsg, err := findCommitter(ctx, api.Cache, db.DbMap, "refs/tags/v1.0", "commitsha", testGPGKeyID, projKey, vcsProject, repoName, vcsPublicKeys)
+
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, status)
+	require.Contains(t, errMsg, "unable to find commiter for commit commitsha")
+	require.Nil(t, initiator)
+}
+
+// TestFindCommitter_GithubUnsignedTag_CommitterFound: tag léger (pas de signature), le committer a un user link Github dans CDS
+func TestFindCommitter_GithubUnsignedTag_CommitterFound(t *testing.T) {
+	api, db, vcsProject, projKey, repoName, cleanup := setupFindCommitterTest(t)
+	defer cleanup()
+	ctx := context.TODO()
+
+	u, _ := assets.InsertLambdaUser(t, db)
+	githubID := sdk.RandomString(8)
+	githubUsername := sdk.RandomString(10)
+	ul := sdk.UserLink{
+		Type:               "github",
+		AuthentifiedUserID: u.ID,
+		Username:           githubUsername,
+		ExternalID:         githubID,
+	}
+	require.NoError(t, link.Insert(ctx, db, &ul))
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client { return servicesClients }
+
+	// Tag sans signature → branche else → appel au commit pointé par le tag
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/tags/v1.0", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+			tag := &sdk.VCSTag{
+				Tag:  "v1.0",
+				Sha:  "tagsha",
+				Hash: "commitsha",
+			}
+			*(out.(*sdk.VCSTag)) = *tag
+			return nil, 200, nil
+		}).Times(1)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/commitsha", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+			commit := &sdk.VCSCommit{
+				Author: sdk.VCSAuthor{
+					Name: githubUsername,
+					ID:   githubID,
+				},
+			}
+			*(out.(*sdk.VCSCommit)) = *commit
+			return nil, 200, nil
+		}).Times(1)
+
+	vcsPublicKeys := map[string][]GPGKey{"vcs-server": {{ID: testGPGKeyID}}}
+	// sha="tagsha" = SHA de l'objet tag, tag.Hash="commitsha" = SHA du commit → vérifie que tag.Hash est bien utilisé
+	initiator, status, errMsg, err := findCommitter(ctx, api.Cache, db.DbMap, "refs/tags/v1.0", "tagsha", testGPGKeyID, projKey, vcsProject, repoName, vcsPublicKeys)
+
+	require.NoError(t, err)
+	require.Empty(t, status)
+	require.Empty(t, errMsg)
+	require.NotNil(t, initiator)
+	require.Equal(t, u.ID, initiator.UserID)
+}
+
+// TestFindCommitter_GithubUnsignedTag_CommitterNotFound: tag léger, le committer n'a pas de user link Github dans CDS
+func TestFindCommitter_GithubUnsignedTag_CommitterNotFound(t *testing.T) {
+	api, db, vcsProject, projKey, repoName, cleanup := setupFindCommitterTest(t)
+	defer cleanup()
+	ctx := context.TODO()
+
+	unknownGithubID := sdk.RandomString(8)
+	unknownGithubUsername := sdk.RandomString(10)
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client { return servicesClients }
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/tags/v1.0", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+			tag := &sdk.VCSTag{
+				Tag:  "v1.0",
+				Sha:  "tagsha",
+				Hash: "commitsha",
+			}
+			*(out.(*sdk.VCSTag)) = *tag
+			return nil, 200, nil
+		}).Times(1)
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/commitsha", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+			commit := &sdk.VCSCommit{
+				Author: sdk.VCSAuthor{
+					Name: unknownGithubUsername,
+					ID:   unknownGithubID,
+				},
+			}
+			*(out.(*sdk.VCSCommit)) = *commit
+			return nil, 200, nil
+		}).Times(1)
+
+	vcsPublicKeys := map[string][]GPGKey{"vcs-server": {{ID: testGPGKeyID}}}
+	// sha="tagsha" = SHA de l'objet tag, tag.Hash="commitsha" = SHA du commit → vérifie que tag.Hash est bien utilisé
+	initiator, status, errMsg, err := findCommitter(ctx, api.Cache, db.DbMap, "refs/tags/v1.0", "tagsha", testGPGKeyID, projKey, vcsProject, repoName, vcsPublicKeys)
+
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, status)
+	require.Contains(t, errMsg, unknownGithubUsername)
+	require.Nil(t, initiator)
+}
+
+// insertAnalysisDeadlineTestRepository builds the minimum a repository analysis
+// needs to exist: a project, a VCS server on it, and a repository.
+func insertAnalysisDeadlineTestRepository(t *testing.T, api *API, db *test.FakeTransaction) sdk.ProjectRepository {
+	t.Helper()
+	key := sdk.RandomString(10)
+	proj := assets.InsertTestProject(t, db, api.Cache, key, key)
+	vcsProject := assets.InsertTestVCSProject(t, db, proj.ID, "vcs-server", "github")
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		CloneURL:     "myurl",
+		ProjectKey:   proj.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+	return repo
+}
+
+// ageRepositoryAnalysis backdates last_modified in place. The signed canonical
+// form is {ID}{ProjectRepositoryID}{VCSProjectID}{ProjectKey}{Commit}, so
+// writing a timestamp in SQL leaves the signature valid.
+func ageRepositoryAnalysis(t *testing.T, db gorpmapper.SqlExecutorWithTx, analysisID string, age time.Duration) {
+	t.Helper()
+	_, err := db.Exec("UPDATE project_repository_analysis SET last_modified = $1 WHERE id = $2", time.Now().Add(-age), analysisID)
+	require.NoError(t, err)
+}
+
+// TestExpireStaleRepositoryAnalysesFailsOnlyThePastDeadlineOnes checks both
+// directions of the deadline: an analysis inside it is left InProgress, one
+// past it ends in Error carrying a message that says why.
+func TestExpireStaleRepositoryAnalysesFailsOnlyThePastDeadlineOnes(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+	repo := insertAnalysisDeadlineTestRepository(t, api, db)
+
+	insert := func(commit string) sdk.ProjectRepositoryAnalysis {
+		a := sdk.ProjectRepositoryAnalysis{
+			ProjectRepositoryID: repo.ID,
+			ProjectKey:          repo.ProjectKey,
+			VCSProjectID:        repo.VCSProjectID,
+			Ref:                 "refs/heads/main",
+			Commit:              commit,
+			Status:              sdk.RepositoryAnalysisStatusInProgress,
+		}
+		require.NoError(t, repository.InsertAnalysis(ctx, db, &a))
+		return a
+	}
+
+	stale := insert("1111111111111111111111111111111111111111")
+	fresh := insert("2222222222222222222222222222222222222222")
+	// Well past the deadline, so the row is among the oldest and cannot fall
+	// outside a bounded sweep.
+	ageRepositoryAnalysis(t, db, stale.ID, defaultAnalysisTimeout+24*time.Hour)
+
+	api.expireStaleRepositoryAnalyses(ctx, defaultAnalysisTimeout)
+
+	reloadedStale, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, stale.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, reloadedStale.Status)
+	// The error names the timeout, so the outcome is readable.
+	require.Contains(t, reloadedStale.Data.Error, "did not complete within")
+
+	reloadedFresh, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, fresh.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusInProgress, reloadedFresh.Status, "the reaper must not touch work still inside the deadline")
+}
+
+// TestLoadAnalysesInProgressIdleSinceRespectsItsBound checks the query honours
+// its limit and returns the oldest rows first.
+func TestLoadAnalysesInProgressIdleSinceRespectsItsBound(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+	repo := insertAnalysisDeadlineTestRepository(t, api, db)
+
+	for i := 0; i < 5; i++ {
+		a := sdk.ProjectRepositoryAnalysis{
+			ProjectRepositoryID: repo.ID,
+			ProjectKey:          repo.ProjectKey,
+			VCSProjectID:        repo.VCSProjectID,
+			Ref:                 "refs/heads/main",
+			Commit:              fmt.Sprintf("%040d", i),
+			Status:              sdk.RepositoryAnalysisStatusInProgress,
+		}
+		require.NoError(t, repository.InsertAnalysis(ctx, db, &a))
+		ageRepositoryAnalysis(t, db, a.ID, defaultAnalysisTimeout+time.Duration(48+i)*time.Hour)
+	}
+
+	stuck, err := repository.LoadAnalysesInProgressIdleSince(ctx, db, time.Now().Add(-defaultAnalysisTimeout), 3)
+	require.NoError(t, err)
+	require.Len(t, stuck, 3, "the sweep must honour its limit")
+	// Oldest first.
+	for i := 1; i < len(stuck); i++ {
+		require.False(t, stuck[i].LastModified.Before(stuck[i-1].LastModified), "stale analyses must come back oldest first")
+	}
+}
+
+// TestAnalyzeGithubUnverifiedSignature ensures that a commit carrying a signature
+// whose advertised key ID is known to CDS, but that the VCS did not verify, does not
+// resolve any initiator. The key ID in a signature is unauthenticated: trusting it
+// without verification would let anyone inherit another user's permissions.
+func TestAnalyzeGithubUnverifiedSignature(t *testing.T) {
+	api, db, _ := newTestAPI(t)
+	ctx := context.TODO()
+
+	// Create project
+	key1 := sdk.RandomString(10)
+	proj1 := assets.InsertTestProject(t, db, api.Cache, key1, key1)
+
+	uk, err := user.LoadGPGKeyByKeyID(ctx, db, "F344BDDCE15F17D7")
+	if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	if uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	// Register the key matching the signature to a CDS user: without the verification
+	// gate this would make findCommitter resolve that user as the initiator.
+	u, _ := assets.InsertLambdaUser(t, db)
+	userKey := &sdk.UserGPGKey{
+		KeyID:              "F344BDDCE15F17D7",
+		PublicKey:          testGPGPublicKey,
+		AuthentifiedUserID: u.ID,
+	}
+	require.NoError(t, user.InsertGPGKey(ctx, db, userKey))
+
+	// Create VCS
+	vcsProject := assets.InsertTestVCSProject(t, db, proj1.ID, "vcs-server", "github")
+
+	repo := sdk.ProjectRepository{
+		Name:         "myrepo",
+		Created:      time.Now(),
+		VCSProjectID: vcsProject.ID,
+		CreatedBy:    "me",
+		ProjectKey:   proj1.Key,
+	}
+	require.NoError(t, repository.Insert(context.TODO(), db, &repo))
+
+	analysis := sdk.ProjectRepositoryAnalysis{
+		ID:                  "",
+		Status:              sdk.RepositoryAnalysisStatusInProgress,
+		Commit:              "abcdef",
+		ProjectKey:          proj1.Key,
+		ProjectRepositoryID: repo.ID,
+		Created:             time.Now(),
+		LastModified:        time.Now(),
+		Ref:                 "refs/heads/master",
+		VCSProjectID:        vcsProject.ID,
+	}
+	require.NoError(t, repository.InsertAnalysis(ctx, db, &analysis))
+
+	// Mock VCS
+	s, _ := assets.InsertService(t, db, t.Name()+"_VCS", sdk.TypeVCS)
+	sHooks, _ := assets.InsertService(t, db, t.Name()+"_HOOKS", sdk.TypeHooks)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client {
+		return servicesClients
+	}
+	defer func() {
+		_ = services.Delete(db, s)
+		_ = services.Delete(db, sHooks)
+		services.NewClient = services.NewDefaultClient
+	}()
+
+	servicesClients.EXPECT().DoJSONRequest(gomock.Any(), "POST", "/v2/repository/event/callback", gomock.Any(), gomock.Any()).AnyTimes()
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/abcdef", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(
+			func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+				commit := &sdk.VCSCommit{
+					Signature:          testGPGCommitSignature,
+					Verified:           false,
+					VerificationReason: "invalid",
+					Hash:               "abcdef",
+				}
+				*(out.(*sdk.VCSCommit)) = *commit
+				return nil, 200, nil
+			},
+		).MaxTimes(2)
+
+	require.NoError(t, api.analyzeRepository(ctx, repo.ID, analysis.ID))
+
+	analysisUpdated, err := repository.LoadRepositoryAnalysisById(ctx, db, repo.ID, analysis.ID)
+	require.NoError(t, err)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, analysisUpdated.Status)
+	require.Equal(t, "commit abcdef signature with key F344BDDCE15F17D7 is not verified by vcs-server (reason: invalid): check that the key and the committer email are registered on your vcs-server account", analysisUpdated.Data.Error)
+	// No initiator resolved, and the untrusted key ID must not be recorded as the sign key
+	// (otherwise it would be propagated downstream and trusted to resolve a committer).
+	require.Empty(t, analysisUpdated.Data.Initiator.UserID)
+	require.Empty(t, analysisUpdated.Data.SignKeyID)
+}
+
+func TestCommitSignatureUntrustedReason(t *testing.T) {
+	tests := []struct {
+		name string
+		sig  commitSignature
+		want string
+	}{
+		{"unsigned or unknown to the VCS", commitSignature{}, "commit abcdef is not signed, or its signature is not recognized by github: sign it with a GPG key registered on your github account"},
+		{"unverified with reason", commitSignature{KeyID: "F344BDDCE15F17D7", Reason: "unverified_email"}, "commit abcdef signature with key F344BDDCE15F17D7 is not verified by github (reason: unverified_email): check that the key and the committer email are registered on your github account"},
+		{"unverified without reason", commitSignature{KeyID: "F344BDDCE15F17D7"}, "commit abcdef signature with key F344BDDCE15F17D7 is not verified by github: check that the key and the committer email are registered on your github account"},
+		{"verified", commitSignature{KeyID: "F344BDDCE15F17D7", Verified: true, Reason: "valid"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, tt.sig.untrustedReason("abcdef", "github"))
+		})
+	}
+}
+
+// TestFindCommitter_CommitterWithoutLink ensures a commit signed by the VCS key is not attributed to a
+// CDS user from a matching username alone: the committer must be linked to that user.
+func TestFindCommitter_CommitterWithoutLink(t *testing.T) {
+	for _, vcsType := range []string{sdk.VCSTypeBitbucketServer, sdk.VCSTypeForgejo} {
+		t.Run(vcsType, func(t *testing.T) {
+			api, db, vcsProject, projKey, repoName, cleanup := setupFindCommitterTest(t)
+			defer cleanup()
+			ctx := context.TODO()
+			vcsProject.Type = vcsType
+
+			// Make sure the signing key is not registered on a CDS user by a previous test
+			uk, err := user.LoadGPGKeyByKeyID(ctx, db, testGPGKeyID)
+			if err != nil && !sdk.ErrorIs(err, sdk.ErrNotFound) {
+				require.NoError(t, err)
+			}
+			if uk != nil {
+				require.NoError(t, user.DeleteGPGKey(db, *uk))
+			}
+
+			// A CDS user with the same username as the committer, without any link
+			u, _ := assets.InsertLambdaUser(t, db)
+
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			servicesClients := mock_services.NewMockClient(ctrl)
+			services.NewClient = func(_ []sdk.Service) services.Client { return servicesClients }
+
+			servicesClients.EXPECT().
+				DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/commitsha", gomock.Any(), gomock.Any(), gomock.Any()).
+				DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+					*(out.(*sdk.VCSCommit)) = sdk.VCSCommit{
+						Hash:      "commitsha",
+						Author:    sdk.VCSAuthor{Name: u.Username, Slug: u.Username},
+						Committer: sdk.VCSAuthor{Name: u.Username, Slug: u.Username},
+					}
+					return nil, 200, nil
+				}).Times(1)
+
+			vcsPublicKeys := map[string][]GPGKey{"vcs-server": {{ID: testGPGKeyID}}}
+			initiator, status, errMsg, err := findCommitter(ctx, api.Cache, db.DbMap, "refs/heads/master", "commitsha", testGPGKeyID, projKey, vcsProject, repoName, vcsPublicKeys)
+
+			require.NoError(t, err)
+			require.Nil(t, initiator)
+			require.Equal(t, sdk.RepositoryAnalysisStatusError, status)
+			require.Equal(t, fmt.Sprintf("%s user %s is not linked to a CDS user", vcsType, u.Username), errMsg)
+		})
+	}
+}
+
+// Bitbucket Server reports no slug when the committer email maps to no Bitbucket account: the git name
+// is not trusted.
+func TestFindCommitter_BitbucketServerCommitterWithoutSlug(t *testing.T) {
+	api, db, vcsProject, projKey, repoName, cleanup := setupFindCommitterTest(t)
+	defer cleanup()
+	ctx := context.TODO()
+	vcsProject.Type = sdk.VCSTypeBitbucketServer
+
+	if uk, err := user.LoadGPGKeyByKeyID(ctx, db, testGPGKeyID); err == nil && uk != nil {
+		require.NoError(t, user.DeleteGPGKey(db, *uk))
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	servicesClients := mock_services.NewMockClient(ctrl)
+	services.NewClient = func(_ []sdk.Service) services.Client { return servicesClients }
+
+	servicesClients.EXPECT().
+		DoJSONRequest(gomock.Any(), "GET", "/vcs/vcs-server/repos/myrepo/commits/commitsha", gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, method, path string, in interface{}, out interface{}, _ interface{}) (http.Header, int, error) {
+			*(out.(*sdk.VCSCommit)) = sdk.VCSCommit{
+				Hash:      "commitsha",
+				Committer: sdk.VCSAuthor{Name: "someone", Email: "someone@example.com"},
+			}
+			return nil, 200, nil
+		}).Times(1)
+
+	vcsPublicKeys := map[string][]GPGKey{"vcs-server": {{ID: testGPGKeyID}}}
+	initiator, status, errMsg, err := findCommitter(ctx, api.Cache, db.DbMap, "refs/heads/master", "commitsha", testGPGKeyID, projKey, vcsProject, repoName, vcsPublicKeys)
+
+	require.NoError(t, err)
+	require.Nil(t, initiator)
+	require.Equal(t, sdk.RepositoryAnalysisStatusError, status)
+	require.Equal(t, "committer someone <someone@example.com> is not recognized by vcs-server: set the email of your vcs-server account in your git config", errMsg)
+}
+
+// linkBitbucketServerUser links the user to the Bitbucket Server account of the same name, which is
+// how a Bitbucket Server committer is mapped to a CDS user.
+func linkBitbucketServerUser(t *testing.T, db *test.FakeTransaction, u *sdk.AuthentifiedUser) {
+	require.NoError(t, link.Insert(context.TODO(), db, &sdk.UserLink{
+		AuthentifiedUserID: u.ID,
+		Type:               string(sdk.ConsumerBitbucketServer),
+		ExternalID:         u.Username,
+		Username:           u.Username,
+	}))
+}

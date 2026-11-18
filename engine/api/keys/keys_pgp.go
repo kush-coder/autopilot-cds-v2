@@ -1,0 +1,143 @@
+package keys
+
+import (
+	"bytes"
+	"crypto/rsa"
+	"errors"
+	"fmt"
+	"io"
+
+	"github.com/ovh/cds/sdk"
+	"golang.org/x/crypto/openpgp"
+	"golang.org/x/crypto/openpgp/armor"
+	"golang.org/x/crypto/openpgp/packet"
+)
+
+// GetOpenPGPEntity returns a single entity from an armored entity list
+func GetOpenPGPEntity(r io.Reader) (*openpgp.Entity, error) {
+	entityList, err := openpgp.ReadArmoredKeyRing(r)
+	if err != nil {
+		return nil, sdk.WrapError(err, "Unable to read armored key ring")
+	}
+
+	if len(entityList) != 1 {
+		return nil, errors.New("GetOpenPGPEntity> Invalid PGP entity list")
+	}
+
+	keys := entityList.DecryptionKeys()
+	if len(keys) != 1 {
+		return nil, errors.New("GetOpenPGPEntity> Invalid PGP decryption keys")
+	}
+
+	return entityList[0], nil
+}
+
+// NewOpenPGPEntity create an openpgp Entity
+func NewOpenPGPEntity(keyname, comment, email string) (*openpgp.Entity, error) {
+	key, errE := openpgp.NewEntity(keyname, comment, email, nil)
+	if errE != nil {
+		return nil, sdk.WrapError(errE, "NewOpenPGPEntity> Cannot create new entity")
+	}
+
+	if len(key.Subkeys) != 1 {
+		return nil, fmt.Errorf("Wrong key generation")
+	}
+
+	OrderRSAPrimes(key.PrivateKey)
+	for _, sk := range key.Subkeys {
+		OrderRSAPrimes(sk.PrivateKey)
+	}
+
+	// Self sign Identity
+	for _, id := range key.Identities {
+		id.SelfSignature.PreferredSymmetric = []uint8{
+			uint8(packet.CipherAES256),
+			uint8(packet.Cipher3DES),
+		}
+		id.SelfSignature.PreferredHash = []uint8{
+			sha512,
+		}
+		if err := id.SelfSignature.SignUserId(id.UserId.Id, key.PrimaryKey, key.PrivateKey, nil); err != nil {
+			return nil, sdk.WrapError(err, "Cannot sign identity")
+		}
+	}
+
+	return key, nil
+}
+
+// OrderRSAPrimes makes the serialized key satisfy p < q (RFC 4880 5.5.3), which libgcrypt relies on:
+// with p > q, gpg sometimes produces invalid signatures. x/crypto/openpgp writes Primes[1] as p.
+func OrderRSAPrimes(k *packet.PrivateKey) {
+	priv, ok := k.PrivateKey.(*rsa.PrivateKey)
+	if !ok || len(priv.Primes) != 2 || priv.Primes[1].Cmp(priv.Primes[0]) < 0 {
+		return
+	}
+	priv.Primes[0], priv.Primes[1] = priv.Primes[1], priv.Primes[0]
+	priv.Precomputed = rsa.PrecomputedValues{} // drop the stale CRT values, Precompute reuses them otherwise
+	priv.Precompute()
+}
+
+// generatePGPPrivateKey generates a private key
+func generatePGPPrivateKey(key *openpgp.Entity) (io.Reader, error) {
+	bufPrivate := new(bytes.Buffer)
+	w, errPrivEncode := armor.Encode(bufPrivate, openpgp.PrivateKeyType, nil)
+	if errPrivEncode != nil {
+		return nil, sdk.WrapError(errPrivEncode, "generatePGPPrivateKey> Cannot encode private key")
+	}
+	defer w.Close()
+	if err := key.SerializePrivate(w, &packet.Config{}); err != nil {
+		return nil, sdk.WrapError(err, "Cannot serialize private key")
+	}
+	return bufPrivate, nil
+}
+
+// generatePGPPublicKey generates a public key
+func generatePGPPublicKey(key *openpgp.Entity) (io.Reader, error) {
+	bufPublic := new(bytes.Buffer)
+	w, errEncode := armor.Encode(bufPublic, openpgp.PublicKeyType, nil)
+	if errEncode != nil {
+		return nil, sdk.WrapError(errEncode, "generatePGPPublicKey> Cannot encode public key")
+	}
+	defer w.Close()
+	if err := key.Serialize(w); err != nil {
+		return nil, sdk.WrapError(err, "Cannot serialize public key")
+	}
+	return bufPublic, nil
+}
+
+// GeneratePGPKeyPair generates a private / public PGP key
+func GeneratePGPKeyPair(name, comment, email string) (sdk.Key, error) {
+	k := sdk.Key{
+		Name: name,
+		Type: sdk.KeyTypePGP,
+	}
+	key, err := NewOpenPGPEntity(name, comment, email)
+	if err != nil {
+		return k, err
+	}
+	k.KeyID = key.PrimaryKey.KeyIdShortString()
+	k.LongKeyID = key.PrimaryKey.KeyIdString()
+
+	bufPrivate, err := generatePGPPrivateKey(key)
+	if err != nil {
+		return k, err
+	}
+
+	bufPublic, err := generatePGPPublicKey(key)
+	if err != nil {
+		return k, err
+	}
+
+	pub, errPub := io.ReadAll(bufPublic)
+	if errPub != nil {
+		return k, sdk.WrapError(errPub, "GeneratePGPKeyPair> Unable to read public key")
+	}
+
+	priv, errPriv := io.ReadAll(bufPrivate)
+	if errPriv != nil {
+		return k, sdk.WrapError(errPriv, "GeneratePGPKeyPair>  Unable to read private key")
+	}
+	k.Private = string(priv)
+	k.Public = string(pub)
+	return k, err
+}

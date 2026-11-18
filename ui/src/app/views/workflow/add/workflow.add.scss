@@ -1,0 +1,47 @@
+@use '../../../../common' as common;
+
+#WorkflowAdd {
+  display: flex;
+  flex-direction: column;
+  align-content: stretch;
+  height: 100%;
+
+  .nzSegment {
+    padding: 10px;
+  }
+
+  h2 {
+    text-align: center;
+  }
+
+  nz-row {
+    margin-top: 10px;
+  }
+
+  pre {
+    word-wrap: break-word;
+  }
+  
+  nz-space-compact {
+    width: 100%;
+    text-align: center;
+
+    button {
+      width: 300px;
+    }
+  }
+
+  nz-form-item.alignCenter {
+    text-align: center;
+  }
+
+  nz-form-item.alignRight {
+    text-align: right;
+    button {
+      margin-left: 10px;
+    }
+  }
+  hr {
+    margin-bottom: 20px;
+  }
+}

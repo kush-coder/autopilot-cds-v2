@@ -1,0 +1,69 @@
+<nz-select [nzSize]="size" [ngModel]="selectedRef" [nzDropdownMatchSelectWidth]="false"
+  (click)="$event.stopPropagation()" [nzDropdownRender]="selectTemplate" [nzOptionHeightPx]="0"
+  [nzCustomTemplate]="selectLabelTmpl" [nzDisabled]="disabled" [nzPlaceHolder]="placeHolder" #select>
+
+  @for (opt of branches; track opt) {
+    <nz-option [nzValue]="'refs/heads/' + opt.display_id"
+    [nzLabel]="opt.display_id"></nz-option>
+  }
+  @for (opt of tags; track opt) {
+    <nz-option [nzValue]="'refs/tags/' + opt.tag" [nzLabel]="opt.tag"></nz-option>
+  }
+
+  <ng-template #selectTemplate>
+    @if (branches?.length > 0 || tags?.length > 0) {
+      <div class="container" [class.night]="darkActive">
+        <nz-input-wrapper>
+          <input type="text" nz-input placeholder="Search for ref" aria-label="Search for ref" (input)="onFilterRefChange($event)" />
+          <span nzInputSuffix nz-icon nzType="search" aria-hidden="true"></span>
+        </nz-input-wrapper>
+        @if (selectedRef) {
+          <nz-tabs nzSize="small" [nzSelectedIndex]="selectedRef.startsWith('refs/tags/') ? 1 : 0"
+            nzType="card">
+            <nz-tab [nzTitle]="branchesTitle">
+              <ng-template #branchesTitle>
+                <span nz-icon nzType="branches" nzTheme="outline"></span>
+                Branches
+              </ng-template>
+              <div class="options" role="listbox">
+                @for (opt of filteredBranches; track opt) {
+                  <div class="option" [title]="opt.display_id" role="option" tabindex="0"
+                    [class.active]="selectedRef === 'refs/heads/' + opt.display_id" [attr.aria-selected]="selectedRef === 'refs/heads/' + opt.display_id"
+                    (click)="clickOption('refs/heads/' + opt.display_id)" (keydown.enter)="clickOption('refs/heads/' + opt.display_id)"
+                    (keydown.space)="$event.preventDefault(); clickOption('refs/heads/' + opt.display_id)">{{opt.display_id}}</div>
+                }
+              </div>
+              @if (!filteredBranches || filteredBranches.length === 0) {
+                <nz-empty nzNotFoundImage="simple"></nz-empty>
+              }
+            </nz-tab>
+            <nz-tab [nzTitle]="tagsTitle">
+              <ng-template #tagsTitle>
+                <span nz-icon nzType="tags" nzTheme="outline"></span>
+                Tags
+              </ng-template>
+              <div class="options" role="listbox">
+                @for (opt of filteredTags; track opt) {
+                  <div class="option" [title]="opt.tag" role="option" tabindex="0"
+                    [class.active]="selectedRef === 'refs/tags/' + opt.tag" [attr.aria-selected]="selectedRef === 'refs/tags/' + opt.tag"
+                    (click)="clickOption('refs/tags/' + opt.tag)" (keydown.enter)="clickOption('refs/tags/' + opt.tag)"
+                    (keydown.space)="$event.preventDefault(); clickOption('refs/tags/' + opt.tag)">
+                  {{opt.tag}}</div>
+                }
+              </div>
+              @if (!filteredTags || filteredTags.length === 0) {
+                <nz-empty nzNotFoundImage="simple"></nz-empty>
+              }
+            </nz-tab>
+          </nz-tabs>
+        }
+      </div>
+    }
+  </ng-template>
+
+  <ng-template #selectLabelTmpl let-selected>
+    <span nz-icon [nzType]="selected.nzValue.startsWith('refs/tags/') ? 'tags' : 'branches'" nzTheme="outline"></span>
+    {{ selected.nzLabel }}
+  </ng-template>
+
+</nz-select>

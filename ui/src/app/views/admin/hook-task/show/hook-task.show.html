@@ -1,0 +1,72 @@
+<div class="wrapper">
+  <app-breadcrumb [path]="path"></app-breadcrumb>
+  <app-scrollview class="scrollview">
+    <form nz-form>
+
+      <nz-row>
+        <nz-col [nzSpan]="24">
+          <h2>Hook configuration</h2>
+          @if (task && task.config) {
+            @for (k of task.config | keys; track k) {
+              <nz-form-item>
+                <nz-form-label [nzSpan]="2" nzFor="cds-field-{{k}}">{{k}}</nz-form-label>
+                <nz-form-control>
+                  @if (k !== 'payload') {
+                    <input nz-input type="text" name="value-{{k}}" id="cds-field-{{k}}" [ngModel]="task.config[k].value" [readonly]="true">
+                  }
+                  @if (k === 'payload') {
+                    <codemirror class="code"name="value-{{k}}" [ngModel]="task.config[k].value" [config]="codeMirrorConfig"
+                      #textareaCodeMirror>
+                    </codemirror>
+                  }
+                </nz-form-control>
+              </nz-form-item>
+            }
+          }
+        </nz-col>
+      </nz-row>
+      <nz-row>
+        <nz-col [nzSpan]="selectedExecution?11:24">
+          <h2>Executions</h2>
+          <app-data-table [withPagination]="10" [columns]="columns" [data]="executions" [loading]="loading"></app-data-table>
+        </nz-col>
+        @if (selectedExecution) {
+          <nz-col [nzSpan]="12" [nzOffset]="1">
+            <h2>{{'workflow_hook_log_title' | translate}}</h2>
+            @if (selectedExecution.workflow_run) {
+              <nz-form-item>
+                <nz-form-label [nzSpan]="3" nzFor="cds-field-hook-log">{{'workflow_hook_log_workflow_run' | translate}}</nz-form-label>
+                <nz-form-control>
+                  <input nz-input type="text" name="hook_log" id="cds-field-hook-log" [value]="selectedExecution?.workflow_run" [readonly]="true">
+                </nz-form-control>
+              </nz-form-item>
+            }
+            <nz-form-item>
+              <nz-form-label [nzSpan]="3" nzFor="cds-field-hook-status">Status</nz-form-label>
+              <nz-form-control>
+                <input nz-input type="text" name="hook_status" id="cds-field-hook-status" [value]="selectedExecution.status" [readonly]="true">
+              </nz-form-control>
+            </nz-form-item>
+            @if (selectedExecution.last_error) {
+              <nz-form-item>
+                <nz-form-label [nzSpan]="3" nzFor="cds-field-hook-error">{{'common_error' | translate}}</nz-form-label>
+                <nz-form-control>
+                  <input nz-input type="text" name="hook_error" id="cds-field-hook-error" [value]="selectedExecution?.last_error" [readonly]="true">
+                </nz-form-control>
+              </nz-form-item>
+            }
+            @if (selectedExecutionBody) {
+              <nz-form-item>
+                <nz-form-label [nzSpan]="3">Body</nz-form-label>
+                <nz-form-control>
+                  <codemirror class="code" name="hook_body" [ngModel]="selectedExecutionBody" [config]="codeMirrorConfig"></codemirror>
+                </nz-form-control>
+              </nz-form-item>
+            }
+          </nz-col>
+        }
+      </nz-row>
+
+    </form>
+  </app-scrollview>
+</div>

@@ -1,0 +1,8 @@
+version: v1.0
+name: ITSCWRKFLW15-PIPELINE
+jobs:
+- job: NewJob
+  steps:
+  - deploy: '{{.cds.application}}'
+  requirements:
+  - os-architecture: linux/amd64

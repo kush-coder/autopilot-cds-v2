@@ -1,0 +1,70 @@
+<div class="content">
+
+  @if (nodeToRun && nodeToRun.type === nodeTypeEnum.PIPELINE && parameters?.length > 0 ) {
+    <h3>{{ 'workflow_node_context_pipeline_parameter' | translate}}</h3>
+    <app-parameter-list [parameters]="parameters"
+      [paramsRef]="workflow.pipelines[nodeToRun.context.pipeline_id]?.parameters"
+      mode="launcher"
+    [suggest]="[]"></app-parameter-list>
+  }
+  @if (!readOnly) {
+    <h3>{{ 'workflow_node_context_payload' | translate}}</h3>
+  }
+  @if (readOnly) {
+    <h3>{{ 'workflow_node_context_payload_read_only' | translate}}</h3>
+  }
+  @if (!loadingBranches) {
+    <codemirror [class.invalid]="invalidJSON" [(ngModel)]="payloadString" [config]="codeMirrorConfig" aria-label="Run payload editor"
+      (click)="changeCodeMirror(textareaCodeMirror, $event)"
+      (change)="changeCodeMirror(textareaCodeMirror, $event)" #textareaCodeMirror>
+    </codemirror>
+  }
+  <div class="payloadInfo">
+    @if (loadingBranches) {
+      <nz-alert nzType="info" nzMessage="Loading..."></nz-alert>
+    }
+    @if (invalidJSON) {
+      <nz-alert nzType="error" nzMessage="Invalid JSON"></nz-alert>
+    }
+    @if (!invalidJSON) {
+      <button nz-button (click)="reindent()" class="reindent">Format</button>
+    }
+  </div>
+
+  <h3>Commit list</h3>
+  @if (!loadingCommits && commits != null && commits.length !== 0) {
+    <div class="scrollable">
+      <app-commit-list [commits]="commits"></app-commit-list>
+    </div>
+  }
+  @if (!loadingCommits && (commits == null || commits.length === 0)) {
+    <nz-alert nzType="info" nzMessage="There is no commit"></nz-alert>
+  }
+  @if (loadingCommits) {
+    <nz-alert nzType="info" nzMessage="Loading commits..."></nz-alert>
+  }
+</div>
+<div *nzModalFooter>
+  <button nz-button [disabled]="loading" (click)="close()">Cancel</button>
+  <nz-space-compact>
+    <button nz-button nzType="primary" [nzLoading]="loading" [disabled]="loading"
+      (click)="run(false, false)" autofocus>Run
+    </button>
+    @if (!loading && currentNodeRun) {
+      <button nz-button nzType="primary" nz-dropdown [nzDropdownMenu]="menu"
+        nzPlacement="bottomRight" aria-label="More run options">
+        <i nz-icon nzType="down" aria-hidden="true"></i>
+      </button>
+    }
+    <nz-dropdown-menu #menu="nzDropdownMenu">
+      <ul nz-menu>
+        <li nz-menu-item appClickable [nzDisabled]="workflow?.from_repository" (click)="run(true, false)" nz-tooltip nzTooltipTitle="When you resync this run, it will update the pipelines linked to this run with your last editions. It won't resync your project variables.">
+          <i nz-icon nzType="sync" nzTheme="outline" aria-hidden="true"></i>{{'workflow_resync' | translate }}
+        </li>
+        <li nz-menu-item appClickable [nzDisabled]="currentNodeRun?.status !== 'Fail'" (click)="run(false, true)">
+          <i nz-icon nzType="bug" nzTheme="outline" aria-hidden="true"></i>{{'workflow_run_only_failed' | translate }}
+        </li>
+      </ul>
+    </nz-dropdown-menu>
+  </nz-space-compact>
+</div>

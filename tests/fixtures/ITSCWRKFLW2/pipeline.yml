@@ -1,0 +1,17 @@
+version: v1.0
+name: ITSCWRKFLW2-PIPELINE
+stages:
+- Build
+options:
+  Build:
+    conditions:
+      git.branch: master
+jobs:
+- job: Engine Build linux amd64
+  stage: Build
+  description: Compile CDS Engine
+  steps:
+  - script:
+    - "echo Hello foo: {{.cds.application}}"
+  requirements:
+  - os-architecture: linux/amd64

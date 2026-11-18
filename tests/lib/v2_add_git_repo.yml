@@ -1,0 +1,87 @@
+executor: v2_add_git_repo
+input:
+  cdsctl_command: ""
+  cds_project: ""
+  cds_hook_url: ""
+  git_host: ""
+  git_repo: ""
+  git_user: ""
+  git_password: ""
+
+steps:
+  # Delete the repo in forgejo if exists
+  - type: http
+    method: DELETE
+    url: "{{.input.git_host}}/api/v1/repos/{{.input.git_user}}/{{.input.git_repo}}"
+    basic_auth_user: "{{.input.git_user}}"
+    basic_auth_password: "{{.input.git_password}}"
+    assertions:
+    - or:
+      - result.statuscode ShouldEqual 204
+      - result.statuscode ShouldEqual 404
+
+  # Create the repo in forgejo
+  - type: http
+    method: POST
+    url: "{{.input.git_host}}/api/v1/user/repos"
+    basic_auth_user: "{{.input.git_user}}"
+    basic_auth_password: "{{.input.git_password}}"
+    headers:
+      Content-Type: application/json
+    body: >
+      {
+        "name": "{{.input.git_repo}}",
+        "auto_init": true,
+        "default_branch": "master"
+      }
+    assertions:
+    - result.statuscode ShouldEqual 201
+
+  # Setup CDS project repositories
+  - script: >
+      {{.input.cdsctl_command}} experimental project repository add {{.input.cds_project}} my_vcs_server {{.input.git_user}}/{{.input.git_repo}}
+  - script: >
+      {{.input.cdsctl_command}} experimental project repository list {{.input.cds_project}} --vcs-name my_vcs_server --filter reponame={{.input.git_user}}/{{.input.git_repo}} --format json
+    assertions:
+      - and:
+        - result.code ShouldEqual 0
+        - or:
+          - result.systemoutjson.systemoutjson0.reponame ShouldEqual "{{.input.git_user}}/{{.input.git_repo}}"
+          - result.systemoutjson.systemoutjson0.repoName ShouldEqual "{{.input.git_user}}/{{.input.git_repo}}"
+
+  # Add webhook
+  - script: {{.input.cdsctl_command}} experimental project hooks add {{.input.cds_project}} my_vcs_server {{.input.git_user}}/{{.input.git_repo}} --format json
+    vars:
+      hookSecret:
+        from: result.systemoutjson.hook_sign_key
+      hookURL: 
+        from: result.systemoutjson.url
+
+  - type: http
+    method: POST
+    url: "{{.input.git_host}}/api/v1/repos/{{.input.git_user}}/{{.input.git_repo}}/hooks"
+    basic_auth_user: "{{.input.git_user}}"
+    basic_auth_password: "{{.input.git_password}}"
+    headers:
+      Content-Type: application/json
+    body: >
+      {
+        "active": true,
+        "type": "forgejo",
+        "config": {
+            "secret": "{{.hookSecret}}",
+            "content_type": "json",
+            "url": "{{.hookURL}}"
+        },
+        "events": [
+          "push",
+          "pull_request"
+        ]
+      }
+    vars:
+      hookID:
+        from: result.bodyjson.id
+    assertions:
+    - result.statuscode ShouldEqual 201
+
+output: {}

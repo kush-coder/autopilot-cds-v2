@@ -1,0 +1,19 @@
+@use "../../../../../common" as common;
+
+.scope-list {
+    td {
+        border: none !important;
+    }
+}
+
+nz-alert {
+  margin-bottom: 10px;
+}
+
+.alignLeft {
+  text-align: left;
+}
+
+.alignCenter {
+  text-align: center;
+}

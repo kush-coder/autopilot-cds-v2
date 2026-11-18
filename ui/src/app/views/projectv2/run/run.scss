@@ -1,0 +1,493 @@
+@use '../../../../common';
+
+:host {
+    display: flex;
+    flex-direction: row;
+    height: 100%;
+}
+
+.run-details {
+    display: flex;
+    flex-direction: row;
+
+    .run-avatar {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        width: 25px;
+        height: 48px;
+
+        [nz-icon] {
+            font-size: 25px;
+
+            &.success {
+                color: common.$cds_color_green;
+            }
+
+            &.fail {
+                color: common.$cds_color_red;
+            }
+
+            &.cancelled {
+                color: common.$polar_grey_2;
+            }
+
+            &.building {
+                color: common.$cds_color_teal;
+            }
+
+            &.blocked {
+                color: common.$cds_color_teal;
+            }
+
+            &.skipped {
+                color: common.$polar_grey_2;
+            }
+
+            &.stopped {
+                font-size: 21px;
+                border: 2px solid common.$cds_color_red;
+                border-radius: 12px;
+                color: common.$cds_color_red;
+            }
+        }
+    }
+
+    .run-info {
+        margin-left: 20px;
+    }
+}
+
+// Frame shown while the run is being read. The spinner only fades in after a moment, so a run that
+// arrives quickly never shows one.
+.loading-shell {
+    .graph-placeholder {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+        color: common.$polar_grey_2;
+        opacity: 0;
+        animation: cds-run-loading-fade-in 200ms ease-out 400ms forwards;
+    }
+}
+
+@keyframes cds-run-loading-fade-in {
+    to {
+        opacity: 1;
+    }
+}
+
+.content {
+    flex: 1;
+    display: flex;
+    position: relative;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+
+    .graph-wrapper {
+        flex: 1;
+        display: flex;
+        flex-direction: row;
+        overflow: hidden;
+
+        .list {
+            overflow-y: auto;
+            height: 100%;
+            // Holds its width from the first frame, the runs it lists are read after the run itself
+            // and would otherwise push the graph sideways when they land.
+            min-width: 53px;
+            flex: 0 0 auto;
+            border-right: 1px solid;
+            border-color: #f0f0f0 !important;
+
+            :host-context(.night) & {
+                border-color: #303030 !important;
+            }
+
+            scrollbar-width: none;
+
+            .item {
+                display: flex;
+                height: 50px;
+                min-width: 50px;
+                max-width: 80px;
+                align-items: center;
+                border-bottom: 1px solid #f0f0f0;
+                border-left: 3px solid transparent;
+                padding-right: 3px;
+                cursor: pointer;
+
+                :host-context(.night) & {
+                    border-bottom-color: #303030;
+                }
+
+                &.placeholder {
+                    cursor: default;
+
+                    &::after {
+                        content: '';
+                        height: 14px;
+                        width: 28px;
+                        margin-left: 8px;
+                        border-radius: 3px;
+                        background-color: #f0f0f0;
+
+                        :host-context(.night) & {
+                            background-color: #303030;
+                        }
+                    }
+                }
+
+                &:hover {
+                    background-color: common.$greyBackground;
+
+                    :host-context(.night) & {
+                        background-color: common.$darkBackground;
+                    }
+                }
+
+                &.selected {
+                    border-left: 3px solid common.$polar_grey_1;
+
+                    :host-context(.night) & {
+                        border-left: 3px solid common.$greyBackground;
+                    }
+                }
+
+                &.append {
+                    background-color: #f5f5f5;
+
+                    :host-context(.night) & {
+                        background-color: rgba(255, 255, 255, 0.08);
+                    }
+                }
+
+                .success {
+                    color: common.$cds_color_green;
+                }
+
+                .fail,
+                .stopped {
+                    color: common.$cds_color_red;
+                }
+
+                .cancelled,
+                .skipped {
+                    color: common.$polar_grey_2;
+                }
+
+                .building,
+                .blocked {
+                    color: common.$cds_color_teal;
+                }
+
+                span {
+                    width: 100%;
+                    padding: 5px;
+                    text-align: center;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+            }
+        }
+
+        .graph {
+            flex: 1;
+            position: relative;
+            display: flex;
+            flex-direction: column-reverse;
+            align-items: center;
+            width: 100%;
+            overflow: hidden;
+
+            // The graph of the run being left stays until the next one is read. It dims only if that
+            // read takes a moment, and comes back at once, the switch itself being animated.
+            &.switching {
+                opacity: 0.55;
+                transition: opacity 150ms ease-out 250ms;
+            }
+
+            .dotted {
+                color: inherit;
+                text-decoration: underline dotted;
+                white-space: nowrap;
+
+                &:hover {
+                    color: #177ddc;
+                }
+            }
+
+            .title {
+                position: absolute;
+                top: 16px;
+                left: 0;
+                z-index: 100;
+                padding: 0;
+
+                ::ng-deep {
+
+                    .ant-page-header-heading,
+                    nz-page-header-content {
+                        background-color: white;
+
+                        :host-context(.night) & {
+                            background-color: #141414;
+                        }
+                    }
+
+                    .ant-page-header-heading {
+                        border-top-right-radius: 10px;
+                        padding: 0 24px 0 24px;
+                    }
+
+                    nz-page-header-content {
+                        display: inline-block;
+                        border-bottom-right-radius: 40px;
+                        padding: 0 24px 0 56px;
+                    }
+                }
+
+                [nzCopyable] {
+                    color: inherit;
+
+                    ::ng-deep {
+                        .ant-typography-copy {
+                            color: inherit;
+                            margin: 0 2px 0 0;
+                        }
+
+                        &:hover {
+                            color: #177ddc;
+                        }
+                    }
+                }
+
+                .annotations {
+                    display: flex;
+                    align-items: center;
+                    margin: 8px 0;
+
+                    &>* {
+                        margin-right: 8px;
+                    }
+                }
+            }
+
+            .controls {
+                z-index: 100;
+                margin-bottom: 20px;
+                padding: 10px;
+                display: flex;
+                flex-direction: row;
+                align-items: center;
+
+                >button:not(:first-child),
+                >nz-space-compact:not(:first-child) {
+                    margin-left: 10px;
+                }
+
+                button:not([nzDanger], [nzType="primary"]) {
+                    background-color: #fff;
+
+                    :host-context(.night) & {
+                        background-color: #141414;
+                    }
+                }
+
+                .help {
+                    margin-left: 10px;
+                    width: 30px;
+                    height: 30px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    cursor: help;
+                    font-size: 20px;
+                    opacity: 0.45;
+                    transition: opacity 0.2s;
+
+                    &:hover {
+                        opacity: 0.85;
+                    }
+                }
+            }
+
+            app-graph {
+                position: absolute;
+                top: 0;
+                bottom: 0;
+                width: 100%;
+                height: 100%s;
+            }
+
+            nz-page-header-title {
+                font-size: 16px;
+                display: flex;
+                flex-direction: row;
+                align-items: center;
+
+                button,
+                nz-select {
+                    margin-left: 5px;
+                }
+
+                a {
+                    color: inherit;
+
+                    &:hover {
+                        color: #177ddc;
+                    }
+                }
+            }
+
+            nz-page-header-content {
+                padding: 0 0 0 32px;
+
+                .templateDetails {
+                    margin-left: 5px;
+                }
+            }
+        }
+    }
+
+    &.disableSelection {
+        user-select: none;
+    }
+
+    app-tabs {
+        ::ng-deep {
+            .ant-menu {
+                background-color: common.$greyBackground !important;
+
+                :host-context(.night) & {
+                    background-color: common.$darkBackground !important;
+                    color: common.$darkTheme_grey_6;
+                }
+            }
+        }
+    }
+
+    .tests {
+        [nz-icon] {
+            margin-left: 8px;
+            margin-right: 2px;
+        }
+
+        .ko {
+            color: common.$darkTheme_red;
+        }
+
+        .skipped {
+            color: common.$darkTheme_orange;
+        }
+
+        .ok {
+            color: common.$darkTheme_green;
+        }
+    }
+
+    .bottom-panel {
+        height: 100%;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+
+        // The tabs of the panel are kept alive and hidden rather than destroyed, so that leaving one and
+        // coming back does not reset its zoom, its unfolded lanes or its filters. Said here because each
+        // of them sets its own display, which would otherwise win against the one `hidden` asks for.
+        > [hidden] {
+            display: none;
+        }
+    }
+}
+
+app-resizable-panel {
+    z-index: 200;
+    position: relative;
+
+    .controls {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        top: 0;
+        left: -37px;
+        background-color: common.$greyBackground;
+        border-bottom-left-radius: 5px;
+        border: 1px solid #f0f0f0;
+        border-top: none;
+        border-right: none;
+
+        :host-context(.night) & {
+            background-color: common.$darkBackground;
+            border-color: #303030;
+        }
+
+        .control {
+            height: 38px;
+            width: 38px;
+            cursor: pointer;
+            text-align: center;
+            font-size: 18px;
+            line-height: 38px;
+
+            :host-context(.night) & {
+                color: common.$darkTheme_grey_6;
+            }
+
+            &:hover {
+                color: common.$darkTheme_grey_5;
+
+                :host-context(.night) & {
+                    color: white;
+                }
+            }
+
+            &.expand {
+                [nz-icon] {
+                    transform: rotate(270deg);
+                }
+            }
+
+            &.expanded {
+                [nz-icon] {
+                    transform: rotate(90deg);
+                }
+            }
+        }
+    }
+}
+
+.shortcuts-tooltip {
+    display: flex;
+    flex-direction: column;
+    padding: 10px;
+
+    div:first-child {
+        margin-bottom: 3px;
+    }
+
+    div:not(:first-child) {
+        margin-top: 6px;
+    }
+
+    kbd {
+        display: inline-block;
+        min-width: 20px;
+        padding: 2px 6px;
+        font-family: inherit;
+        font-size: 11px;
+        line-height: 16px;
+        text-align: center;
+        color: #fff;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        border-bottom-width: 2px;
+        border-radius: 4px;
+        box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+        margin-right: 4px;
+    }
+}

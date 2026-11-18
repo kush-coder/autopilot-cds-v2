@@ -1,0 +1,57 @@
+.list {
+  display: flex;
+  flex-direction: column;
+  align-content: stretch;
+  height: 100%;
+
+  nz-col {
+    margin-bottom: 20px;
+
+    .nzSegment.extra {
+      height: 40px;
+      margin-top: -5px;
+      border-radius: 3px;
+      border-top: none;
+      display: flex;
+      flex-direction: row;
+      padding-top: 4px;
+      padding-left: 6px;
+      padding-right: 2px;
+      align-items: center;
+
+      .right {
+        margin-left: auto;
+        padding-right: 5px;
+      }
+    }
+  }
+}
+
+app-card {
+  cursor: pointer;
+}
+.content {
+  width: 100%;
+}
+
+.alignRight {
+  float: right;
+}
+
+nz-list {
+  height: 250px;
+  overflow: hidden;
+  overflow-y: auto;
+}
+
+.footer {
+  height: 15px;
+}
+
+.round {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  border-radius: 8px;
+  margin-right: 5px;
+}

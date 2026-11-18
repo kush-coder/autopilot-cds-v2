@@ -1,0 +1,220 @@
+package repositories
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/rockbears/log"
+
+	"github.com/ovh/cds/engine/service"
+	"github.com/ovh/cds/sdk"
+	cdslog "github.com/ovh/cds/sdk/log"
+)
+
+func muxVar(r *http.Request, s string) string {
+	vars := mux.Vars(r)
+	return vars[s]
+}
+
+func (s *Service) GetLocalCacheHandler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+		return service.WriteJSON(w, s.localCache.Items(), http.StatusOK)
+	}
+}
+
+// getAdminRepositoriesHandler lists the git repositories stored by this
+// instance with their disk usage, sorted by decreasing size.
+func (s *Service) getAdminRepositoriesHandler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+		res := sdk.RepositoriesAdminList{Instance: s.dao.hostname, Repositories: []sdk.RepositoriesAdminEntry{}}
+		if snap := s.repoSizes.Load(); snap != nil {
+			computedAt := snap.computedAt
+			res.ComputedAt = &computedAt
+			res.TotalSize = snap.total
+		}
+
+		for _, c := range cacheRoots {
+			names, err := readCacheEntries(s.rootDir(c))
+			if err != nil {
+				return sdk.WrapError(err, "unable to read %s", s.rootDir(c))
+			}
+			for _, repoID := range names {
+				key := c.cloneKey(repoID)
+				entry := sdk.RepositoriesAdminEntry{ID: repoID, Kind: c.kind, URL: repoID}
+				if url, err := base64.StdEncoding.DecodeString(repoID); err == nil {
+					entry.URL = string(url)
+				}
+				entry.Size, _ = s.repoSize(key)
+				until, expired := s.dao.isExpired(ctx, key)
+				entry.Expired = expired
+				if !expired {
+					entry.ProtectedUntil = &until
+				}
+				res.Repositories = append(res.Repositories, entry)
+			}
+		}
+
+		sort.Slice(res.Repositories, func(i, j int) bool {
+			a, b := res.Repositories[i], res.Repositories[j]
+			if a.Size != b.Size {
+				return a.Size > b.Size
+			}
+			if a.URL != b.URL {
+				return a.URL < b.URL
+			}
+			return a.Kind < b.Kind
+		})
+		return service.WriteJSON(w, res, http.StatusOK)
+	}
+}
+
+func (s *Service) ClearLocalCacheHandler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+		s.localCache.Flush()
+		return nil
+	}
+}
+
+func (s *Service) postOperationHandler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+		op := new(sdk.Operation)
+		files := make(map[string][]byte)
+		ct := r.Header.Get("Content-Type")
+		if strings.Contains(strings.ToLower(ct), "multipart") {
+			var err error
+			op, files, err = readOperationMultipart(r)
+			if err != nil {
+				return err
+			}
+		} else {
+			if err := service.UnmarshalBody(r, op); err != nil {
+				return err
+			}
+		}
+
+		requestID := cdslog.ContextValue(ctx, cdslog.RequestID)
+		log.Info(ctx, "setting request_id:%s on operation:%s", requestID, op.UUID)
+		op.RequestID = requestID
+
+		uuid := sdk.UUID()
+		op.UUID = uuid
+		now := time.Now()
+		op.Date = &now
+		if len(files) != 0 {
+			op.LoadFiles = sdk.OperationLoadFiles{
+				Results: files,
+			}
+		}
+
+		op.Status = sdk.OperationStatusPending
+		if err := s.dao.saveOperation(op); err != nil {
+			return err
+		}
+
+		if err := s.dao.pushOperation(op); err != nil {
+			return err
+		}
+
+		return service.WriteJSON(w, op, http.StatusAccepted)
+	}
+}
+
+func readOperationMultipart(r *http.Request) (*sdk.Operation, map[string][]byte, error) {
+	op := new(sdk.Operation)
+	files := make(map[string][]byte)
+
+	//parse the multipart form in the request
+	if err := r.ParseMultipartForm(100000); err != nil {
+		return nil, nil, sdk.WithStack(err)
+	}
+	for f := range r.MultipartForm.File {
+		file, header, err := r.FormFile(f)
+		if err != nil {
+			file.Close()
+			return nil, nil, sdk.WithStack(err)
+		}
+		fileContentType := header.Header.Get("Content-Type")
+		switch fileContentType {
+		case "application/tar":
+			tr := tar.NewReader(file)
+			// Iterate through the files in the archive.
+			for {
+				hdr, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return nil, nil, sdk.WrapError(err, "error while reading the tar archive")
+				}
+
+				fileBuf := new(bytes.Buffer)
+				if _, err := fileBuf.ReadFrom(tr); err != nil {
+					return nil, nil, sdk.WrapError(err, "error while reading buffer from tar archive")
+				}
+				files[hdr.Name] = fileBuf.Bytes()
+			}
+		}
+		file.Close()
+	}
+
+	if err := sdk.JSONUnmarshal([]byte(r.FormValue("dataJSON")), &op); err != nil {
+		return nil, nil, sdk.WithStack(err)
+	}
+	return op, files, nil
+}
+
+func (s *Service) getOperationsHandler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+		uuid := muxVar(r, "uuid")
+		op := s.dao.loadOperation(ctx, uuid)
+		if op == nil {
+			// NewErrorFrom carries the message to the caller, where WrapError only logs it
+			return sdk.NewErrorFrom(sdk.ErrNotFound, "operation %s not found", uuid)
+		}
+		op.RepositoryStrategy.SSHKeyContent = sdk.PasswordPlaceholder
+		op.RepositoryStrategy.Password = sdk.PasswordPlaceholder
+
+		// Handle old representation of operation error
+		if op.DeprecatedError != "" && op.Error == nil {
+			op.Error = &sdk.OperationError{
+				ID:      sdk.ErrUnknownError.ID,
+				Message: op.DeprecatedError,
+				Status:  sdk.ErrUnknownError.Status,
+			}
+		}
+
+		return service.WriteJSON(w, op, http.StatusOK)
+	}
+}
+
+// Status returns sdk.MonitoringStatus, implements interface service.Service
+func (s *Service) Status(ctx context.Context) *sdk.MonitoringStatus {
+	m := s.NewMonitoringStatus()
+
+	var total int64
+	if snap := s.repoSizes.Load(); snap != nil {
+		total = snap.total
+	}
+	m.Lines = append(m.Lines, sdk.MonitoringStatusLine{
+		Component: "Cache size",
+		Value:     fmt.Sprintf("%d octets", total),
+		Status:    sdk.MonitoringStatusOK,
+	})
+	return m
+}
+
+func (s *Service) getStatusHandler() service.Handler {
+	return func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+		var status = http.StatusOK
+		return service.WriteJSON(w, s.Status(ctx), status)
+	}
+}

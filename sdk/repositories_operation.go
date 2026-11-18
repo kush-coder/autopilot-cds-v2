@@ -1,0 +1,176 @@
+package sdk
+
+import (
+	"encoding/base64"
+	"strings"
+	"time"
+)
+
+// Operation is the main business object use in repositories service
+type Operation struct {
+	UUID               string                   `json:"uuid"`
+	VCSServer          string                   `json:"vcs_server,omitempty"`
+	RepoFullName       string                   `json:"repo_fullname,omitempty"`
+	URL                string                   `json:"url"`
+	RepositoryStrategy RepositoryStrategy       `json:"strategy,omitempty"`
+	Setup              OperationSetup           `json:"setup,omitempty"`
+	LoadFiles          OperationLoadFiles       `json:"load_files,omitempty"`
+	Status             OperationStatus          `json:"status"`
+	Error              *OperationError          `json:"error_details,omitempty"`
+	DeprecatedError    string                   `json:"error,omitempty"`
+	RepositoryInfo     *OperationRepositoryInfo `json:"repository_info,omitempty"`
+	Date               *time.Time               `json:"date,omitempty"`
+	User               struct {
+		Username string `json:"username,omitempty"  db:"-"`
+		Fullname string `json:"fullname,omitempty"  db:"-"`
+		Email    string `json:"email,omitempty"  db:"-"`
+	} `json:"user,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	NbRetries int    `json:"nb_retries,omitempty"`
+}
+
+type OperationError struct {
+	ID         int    `json:"id"`
+	Status     int    `json:"status,omitempty"`
+	Message    string `json:"message"`
+	StackTrace string `json:"stack_trace,omitempty"`
+	From       string `json:"from,omitempty"`
+}
+
+func FromGitToHumanError(targetError, err error) error {
+	return NewErrorFrom(targetError, "%s", strings.Split(err.Error(), "\n")[0])
+}
+
+func ToOperationError(err error) *OperationError {
+	if err == nil {
+		return nil
+	}
+	sdkError := ExtractHTTPError(err)
+	return &OperationError{
+		ID:         sdkError.ID,
+		Status:     sdkError.Status,
+		From:       sdkError.From,
+		Message:    sdkError.Message,
+		StackTrace: sdkError.StackTrace,
+	}
+}
+
+func (opError *OperationError) ToError() error {
+	if opError == nil {
+		return nil
+	}
+	return &Error{
+		ID:      opError.ID,
+		Status:  opError.Status,
+		Message: opError.Message,
+		From:    opError.From,
+	}
+}
+
+// OperationSetup is the setup for an operation basically its a checkout
+type OperationSetup struct {
+	Checkout OperationCheckout `json:"checkout,omitempty"`
+	Push     OperationPush     `json:"push,omitempty"`
+}
+
+// OperationRepositoryInfo represents global information about the repository
+type OperationRepositoryInfo struct {
+	Name          string `json:"name,omitempty"`
+	FetchURL      string `json:"fetch_url,omitempty"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+}
+
+// OperationLoadFiles represents files loading from a globbing pattern
+type OperationLoadFiles struct {
+	Pattern string            `json:"pattern,omitempty"`
+	Results map[string][]byte `json:"results,omitempty"`
+}
+
+// OperationCheckout represents a smart git checkout
+type OperationCheckout struct {
+	Tag                  string `json:"tag,omitempty"`
+	Branch               string `json:"branch,omitempty"`
+	Commit               string `json:"commit,omitempty"`
+	CheckSignature       bool   `json:"check_signature,omitempty"`
+	ProcessSemver        bool   `json:"process_semver,omitempty"`
+	GetChangeSet         bool   `json:"get_changeset,omitempty"`
+	ChangeSetCommitSince string `json:"changeset_commit,omitempty"`
+	ChangeSetBranchTo    string `json:"changeset_branch_to,omitempty"`
+	GetMessage           bool   `json:"get_message,omitempty"`
+	Result               struct {
+		SignKeyID      string `json:"sign_key_id"`
+		CommitVerified bool   `json:"verified"`
+		Msg            string `json:"msg"`
+		Author         string `json:"author"`
+		AuthorEmail    string `json:"author_email"`
+		Semver         struct {
+			Current string `json:"current"`
+			Next    string `json:"next"`
+		} `json:"semver"`
+		CommitMessage string `json:"commit_message"`
+		Files         map[string]OperationChangetsetFile
+	} `json:"result"`
+}
+
+type OperationChangetsetFile struct {
+	Filename string
+	Status   string
+}
+
+// OperationPush represents information about push operation
+type OperationPush struct {
+	FromBranch string `json:"from_branch,omitempty"`
+	ToBranch   string `json:"to_branch,omitempty"`
+	Message    string `json:"message,omitempty"`
+	PRLink     string `json:"pr_link,omitempty"`
+	Update     bool   `json:"update,omitempty"`
+}
+
+// OperationStatus is the status of an operation
+type OperationStatus int
+
+// There are the different OperationStatus values
+const (
+	OperationStatusPending OperationStatus = iota
+	OperationStatusProcessing
+	OperationStatusDone
+	OperationStatusError
+)
+
+// OperationRepo is an operation
+type OperationRepo struct {
+	Basedir            string
+	URL                string
+	RepositoryStrategy RepositoryStrategy
+}
+
+// ID returns a generated ID for a Operation
+func (r OperationRepo) ID() string {
+	return base64.StdEncoding.EncodeToString([]byte(r.URL))
+}
+
+// RepositoriesAdminList describes the git repositories stored on disk by one
+// repositories service instance.
+type RepositoriesAdminList struct {
+	Instance string `json:"instance"`
+	// ComputedAt is the time of the disk-usage measure; nil when sizes were
+	// not measured yet, in which case every Size is 0.
+	ComputedAt   *time.Time               `json:"computed_at"`
+	TotalSize    int64                    `json:"total_size"`
+	Repositories []RepositoriesAdminEntry `json:"repositories"`
+}
+
+// RepositoriesAdminEntry is one git repository directory of a repositories
+// service instance.
+type RepositoriesAdminEntry struct {
+	ID string `json:"id"`
+	// Kind is the cache holding this copy: "full" clone or "bare" partial clone.
+	Kind string `json:"kind"`
+	URL  string `json:"url"`
+	Size int64  `json:"size"`
+	// Expired is true when no retention protects the repository on this
+	// instance: the cleaner removes it at its next run.
+	Expired bool `json:"expired"`
+	// ProtectedUntil is the end of the retention window; nil when Expired.
+	ProtectedUntil *time.Time `json:"protected_until,omitempty"`
+}

@@ -1,0 +1,64 @@
+@use '../../../../../../common' as common;
+
+.Notifications {
+  padding: 20px;
+
+  .section {
+    margin-bottom: 10px;
+
+    h3 {
+      display: inline;
+    }
+
+    button {
+      float: right;
+    }
+  }
+
+  .section:not(:first-child) {
+    margin-top: 50px;
+  }
+
+  .item {
+    padding: 10px;
+    cursor: pointer;
+
+    .content {
+      display: flex;
+      flex-direction: column;
+
+      .title {
+        font-weight: bold;
+
+        button {
+          float: right;
+        }
+      }
+
+      .description {
+        font-size: 0.8em;
+      }
+    }
+  }
+
+  .item.active,
+  .item:hover {
+    background-color: #eeeeee;
+
+    :host-context(.night) & {
+      background-color: common.$darkTheme_grey_1;
+    }
+  }
+
+  .form {
+    padding-left: 30px;
+
+    .help {
+      margin-bottom: 15px;
+    }
+
+    .integrationsList {
+      width: 500px;
+    }
+  }
+}

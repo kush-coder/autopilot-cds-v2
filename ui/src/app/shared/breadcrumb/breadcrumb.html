@@ -1,0 +1,29 @@
+<div class="breadcrumb">
+  <nz-breadcrumb>
+    @for (v of path; track v; let i = $index) {
+      <nz-breadcrumb-item>
+        @if (v.icon) {
+          <i nz-icon [nzType]="v.icon" [nzTheme]="v.iconTheme"></i>
+        }
+        @if (v.routerLink) {
+          <a class="section" [class.active]="v.active" [routerLink]="v.routerLink"
+            [queryParams]="v.queryParams">
+            @if (v.translate) {
+              <span>{{v.translate | translate}}</span>
+            }
+            @if (v.text) {
+              <span>{{v.text}}</span>
+            }
+          </a>
+        }
+        @if (!v.routerLink && v.translate) {
+          <span>{{v.translate | translate}}</span>
+        }
+        @if (!v.routerLink && v.text) {
+          <span>{{v.text}}</span>
+        }
+      </nz-breadcrumb-item>
+    }
+  </nz-breadcrumb>
+  <ng-content></ng-content>
+</div>

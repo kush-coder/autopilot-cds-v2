@@ -1,0 +1,93 @@
+import { HttpErrorResponse, HttpEvent, HttpHandler, HttpInterceptor, HttpRequest } from '@angular/common/http';
+import { Injectable } from '@angular/core';
+import { NavigationStart, Router } from '@angular/router';
+import { TranslateService } from '@ngx-translate/core';
+import { Store } from '@ngxs/store';
+import { ToastService } from 'app/shared/toast/ToastService';
+import { SignoutCurrentUser } from 'app/store/authentication.action';
+import { Observable, throwError } from 'rxjs';
+import { catchError, filter } from 'rxjs/operators';
+
+@Injectable()
+export class ErrorInterceptor implements HttpInterceptor {
+    lastNavigatedURL: string = '';
+
+    constructor(
+        private _toast: ToastService,
+        private _translate: TranslateService,
+        private _store: Store,
+        private _router: Router
+    ) {
+        this._router.events
+            .pipe(filter((e): e is NavigationStart => e instanceof NavigationStart))
+            .subscribe(e => this.lastNavigatedURL = e.url);
+    }
+
+    intercept(req: HttpRequest<any>, next: HttpHandler): Observable<HttpEvent<any>> {
+        return next.handle(req).pipe(
+            catchError(e => {
+                if (e instanceof HttpErrorResponse) {
+                    if (e.status === 0) {
+                        this._toast.error('API Unreachable', '');
+                        return throwError(() => e);
+                    }
+
+                    // ignore error on auth/me used for auth pages and on cdscdn
+                    if (req.url.indexOf('auth/me') !== -1 || req.url.indexOf('cdscdn/item') !== -1) {
+                        return throwError(() => e);
+                    }
+
+                    // ignore 404 errors for /v2/project routes
+                    if (e.status === 404 && req.url.indexOf('/project') !== -1) {
+                        return throwError(() => e);
+                    }
+
+                    // ignore 403 errors for /queue/workflows/<job-id>/infos routes
+                    if (e.status === 403 && /^.*\/queue\/workflows\/[0-9]+\/infos$/.test(req.url)) {
+                        return throwError(() => e);
+                    }
+
+                    // error formatted from CDS API
+                    if (!e.error) {
+                        return throwError(() => e);
+                    }
+
+                    if (e.error.message) {
+                        // 194 is the error for "MFA required. See https://github.com/ovh/cds/blob/master/sdk/error.go#L205"
+                        if (e.error.id === 194) {
+                            if (req.method === 'GET' || confirm(`${e.error.message}.\nYou'll be redirected to authenticate with MFA. Proceed?`)) {
+                                this._store.dispatch(new SignoutCurrentUser()).subscribe(() => {
+                                    this._router.navigate(['/auth/ask-signin/corporate-sso'], {
+                                        queryParams: {
+                                            redirect_uri: this.lastNavigatedURL,
+                                            require_mfa: true
+                                        }
+                                    });
+                                });
+                            }
+                        }
+                        if (req.url.indexOf('cdsapi/v2') === -1 || e.status >= 500) {
+                            // show a toast only for non v2 api errors
+                            this._toast.errorHTTP(e.status, e.error.message, e.error.from, e.error.request_id);
+                        }
+                        return throwError(() => e);
+                    }
+
+                    if (Array.isArray(e.error)) {
+                        try {
+                            let messages = e.error as Array<string>;
+                            this._toast.error(e.statusText, messages.join(', '));
+                        } catch (e) {
+                            this._toast.error(e.statusText, this._translate.instant('common_error'));
+                        }
+                        return throwError(() => e);
+                    }
+
+                    this._toast.error(e.statusText, this._translate.instant('common_error'));
+                    return throwError(() => e);
+                }
+
+                return throwError(() => e);
+            }));
+    }
+}

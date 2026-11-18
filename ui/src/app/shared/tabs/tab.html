@@ -1,0 +1,7 @@
+@if (!tab.template) {
+  @if (tab.icon) {
+    <span nz-icon [nzType]="tab.icon" [nzTheme]="tab.iconTheme" [class]="tab.iconClassColor" aria-hidden="true"></span>
+  }
+  {{tab.title}}
+}
+<span #templateSibling></span>

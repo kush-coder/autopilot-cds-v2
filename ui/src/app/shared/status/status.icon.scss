@@ -1,0 +1,39 @@
+@use '../../../common' as common;
+
+.status-icon {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+
+  .wrapper {
+    height: 30px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+
+    i {
+      margin: 0;
+      font-size: 20px; 
+    }
+  }
+}
+.green {
+  color: common.$cds_color_green;
+}
+.red {
+  color: common.$cds_color_red;
+}
+.orange {
+  color: common.$cds_color_orange;
+}
+.grey {
+  color: common.$polar_grey_2
+}
+.grey.fill {
+  background-color: common.$polar_grey_2;
+}
+.blue {
+  color: common.$cds_color_teal;
+}

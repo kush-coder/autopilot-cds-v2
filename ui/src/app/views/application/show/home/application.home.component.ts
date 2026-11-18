@@ -1,0 +1,97 @@
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, inject, Input, OnDestroy, OnInit } from '@angular/core';
+import { TranslateService } from '@ngx-translate/core';
+import { Store } from '@ngxs/store';
+import { Subscription } from 'rxjs';
+import { filter } from 'rxjs/operators';
+import { Application, Overview } from '../../../../model/application.model';
+import { ChartData, ChartSeries, GraphConfiguration, GraphType } from '../../../../model/graph.model';
+import { Metric } from '../../../../model/metric.model';
+import { Tests } from '../../../../model/pipeline.model';
+import { Project } from '../../../../model/project.model';
+import { AutoUnsubscribe } from '../../../../shared/decorator/autoUnsubscribe';
+import { FetchApplicationOverview } from '../../../../store/applications.action';
+import { ApplicationsState } from '../../../../store/applications.state';
+import { Color } from '@swimlane/ngx-charts';
+
+@Component({
+    standalone: false,
+    selector: 'app-home',
+    templateUrl: './application.home.html',
+    styleUrls: ['./application.home.scss'],
+    changeDetection: ChangeDetectionStrategy.OnPush
+})
+@AutoUnsubscribe()
+export class ApplicationHomeComponent implements OnInit, OnDestroy {
+    @Input() project: Project;
+    @Input() application: Application;
+
+    dashboards: Array<GraphConfiguration>;
+    overview: Overview;
+    overviewSubscription: Subscription;
+
+    private _translate = inject(TranslateService);
+    private store = inject(Store);
+    private _cd = inject(ChangeDetectorRef);
+
+    ngOnDestroy(): void {} // Should be set to use @AutoUnsubscribe with AOT
+
+    ngOnInit(): void {
+        this.store.dispatch(new FetchApplicationOverview({ projectKey: this.project.key, applicationName: this.application.name }));
+        this.overviewSubscription = this.store.select(ApplicationsState.selectOverview())
+            .pipe(filter((o) => o != null))
+            .subscribe((o: Overview) => {
+                this.overview = o;
+                this.renderGraph();
+                this._cd.markForCheck();
+            });
+    }
+
+    renderGraph(): void {
+        this.dashboards = new Array<GraphConfiguration>();
+        if (this.overview?.graphs?.length > 0) {
+            this.overview.graphs.forEach(g => {
+                if (g.datas && g.datas.length) {
+                    switch (g.type) {
+                        case 'UnitTest':
+                            this.createUnitTestDashboard(g.datas);
+                            break;
+                    }
+                }
+            });
+        }
+    }
+
+    createUnitTestDashboard(metrics: Array<Metric>): void {
+        let cc = new GraphConfiguration(GraphType.AREA_STACKED);
+        cc.title = this._translate.instant('graph_unittest_title');
+        cc.colorScheme = <Color>{ domain: [] };
+        cc.gradient = false;
+        cc.showXAxis = true;
+        cc.showYAxis = true;
+        cc.showLegend = true;
+        cc.showXAxisLabel = true;
+        cc.showYAxisLabel = true;
+        cc.xAxisLabel = this._translate.instant('graph_unittest_x');
+        cc.yAxisLabel = this._translate.instant('graph_unittest_y');
+        cc.datas = new Array<ChartData>();
+
+        let lines = ['ok', 'ko', 'skip'];
+        lines.forEach(l => {
+            let cd = new ChartData();
+            cd.name = l;
+            cd.series = new Array<ChartSeries>();
+            metrics.forEach(m => {
+                let v = m.value[l];
+                if (v) {
+                    let cs = new ChartSeries();
+                    cs.name = m.run.toString();
+                    cs.value = v;
+                    cd.series.push(cs);
+                }
+            });
+            cc.datas.push(cd);
+            cc.colorScheme['domain'].push(Tests.getColor(l));
+        });
+        this.dashboards.push(cc);
+    }
+}

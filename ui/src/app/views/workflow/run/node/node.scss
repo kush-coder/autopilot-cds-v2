@@ -1,0 +1,14 @@
+#WorkflowNodeRun {
+    display: flex;
+    flex-direction: column;
+    align-content: stretch;
+    height: 100%;
+
+    .pipeline {
+        height: 100%;
+    }
+}
+
+nz-spin {
+  margin-top: 30px;
+}

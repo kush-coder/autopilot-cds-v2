@@ -1,0 +1,85 @@
+<form nz-form>
+    <div class="link">
+        <i nz-icon nzType="book" nzTheme="outline"></i>
+        <a href="#" [routerLink]="['/docs', 'docs', 'concepts', 'workflow', 'hooks']" target="_blank"
+           rel="noopener noreferrer">{{'common_documentation' | translate}}</a>
+    </div>
+    <h3>Hook configuration</h3>
+    <nz-form-item>
+        <nz-form-label [nzSm]="6" [nzXs]="24" nzFor="cds-field-hookform-type">hook type</nz-form-label>
+        <nz-form-control [nzSm]="14" [nzXs]="24">
+            <ng-container *ngIf="isRun">
+                <input nz-input id="cds-field-hookform-type" name="modelName" [value]="hook?.hook_model_name" [readOnly]="true">
+            </ng-container>
+            <ng-container *ngIf="!isRun">
+                <ng-container *ngIf="!loadingModels">
+                    <nz-select nzShowSearch name="modelName" [nzDisabled]="hook?.uuid || mode === 'ro'" [(ngModel)]="selectedHookModel" (ngModelChange)="updateHookModel()">
+                        <nz-option *ngFor="let m of hooksModel" [nzLabel]="m.name" [nzValue]="m"></nz-option>
+                    </nz-select>
+                </ng-container>
+            </ng-container>
+        </nz-form-control>
+    </nz-form-item>
+    <nz-form-item *ngIf="hook?.uuid">
+        <nz-form-label [nzSm]="6" [nzXs]="24" nzFor="cds-field-hookform-uuid">uuid</nz-form-label>
+        <nz-form-control [nzSm]="14" [nzXs]="24">
+                <input nz-input id="cds-field-hookform-uuid" name="uuid" [value]="hook.uuid" [readOnly]="true">
+        </nz-form-control>
+    </nz-form-item>
+    <ng-container *ngIf="hook?.model && displayConfig">
+        <ng-container *ngIf="hook.config && hook.model.name !== 'Workflow'">
+            <nz-form-item *ngFor="let k of hook.config | keys">
+                <nz-form-label [nzSm]="6" [nzXs]="24" nzFor="cds-field-hookform-{{k}}">{{k}}</nz-form-label>
+                <nz-form-control [nzSm]="14" [nzXs]="24">
+                    <!-- STRING -->
+                    <ng-container *ngIf="k !== 'payload' && (hook.config[k].type === 'string' || !hook.config[k].type)">
+                        <input nz-input id="cds-field-hookform-{{k}}" name="{{k}}" [(ngModel)]="hook.config[k].value" [readonly]="!hook.config[k].configurable || mode === 'ro'"/>
+                    </ng-container>
+                    <!-- PASSWORD -->
+                    <ng-container  *ngIf="k !== 'payload' && hook.config[k].type === 'password'">
+                        <input nz-input id="cds-field-hookform-{{k}}" name="{{k}}" type="password" [(ngModel)]="hook.config[k].value"
+                               [readonly]="!hook.config[k].configurable || mode === 'ro'"/>
+                    </ng-container>
+                    <!-- MULTICHOICE -->
+                    <ng-container *ngIf="k !== 'payload' && hook.config[k].type === 'multiple' && hook.config[k].multiple_choice_list">
+                        <nz-select name="{{k}}" nzMode="multiple" nzShowSearch [(ngModel)]="tempMultipleConfig" (ngModelChange)="updateConfigMultipleChoice(k)" [disabled]="mode === 'ro'">
+                            <nz-option *ngFor="let event of hook.config[k].multiple_choice_list"
+                                       [nzValue]="event" [nzLabel]="event"></nz-option>
+                        </nz-select>
+                    </ng-container>
+
+                    <!-- PAYLOAD -->
+                    <ng-container *ngIf="k === 'payload' && hook.config[k].type === 'string'">
+                        <codemirror name="{{k}}"
+                                aria-label="Hook payload editor"
+                                [class.invalid]="invalidJSON"
+                                [(ngModel)]="hook.config[k].value"
+                                [config]="codeMirrorConfig"
+                                (change)="changeCodeMirror($event)"
+                                #textareaCodeMirror>
+                        </codemirror>
+                    </ng-container>
+                    <ng-container *ngIf="hook.config[k].type === 'integration'">
+                        <nz-select nzShowSearch nzPlaceHolder="Integration" [(ngModel)]="selectedIntegration" (ngModelChange)="updateIntegration()">
+                            <nz-option *ngFor="let integ of availableIntegrations" [nzLabel]="integ.name" [nzValue]="integ"></nz-option>
+                        </nz-select>
+                    </ng-container>
+                </nz-form-control>
+            </nz-form-item>
+        </ng-container>
+        <nz-alert *ngIf="!hook.config" nzMessage="No configuration"></nz-alert>
+    </ng-container>
+    <nz-form-item nzJustify="end">
+        <nz-form-control>
+            <button nz-button nzType="primary"*ngIf="mode === 'update'" (click)="updateHook()"
+                    [disabled]="loading" [nzLoading]="loading">
+                <span *ngIf="workflow.from_repository && workflow.from_repository.length > 0">
+                    Apply
+                </span>
+                <span *ngIf="!(workflow.from_repository && workflow.from_repository.length > 0)">
+                    Save
+                </span>
+            </button>
+        </nz-form-control>
+    </nz-form-item>
+</form>
